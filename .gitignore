@@ -1,0 +1,62 @@
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv
+.python-version-local
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Environment files — never commit local secrets
+.env
+.env.*.local
+.env.local
+
+# GCP service account keys — never commit
+*-service-account*.json
+gcp-key*.json
+service-account*.json
+
+# Claude Code — local-only settings + session logs
+.claude/settings.local.json
+.claude/session.log
+
+# Test + lint caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Local data dumps (raw scraped data should not be committed)
+.tmp/
+data/raw/
+data/processed/
+
+# Vercel (in case any frontend tooling ends up here)
+.vercel/

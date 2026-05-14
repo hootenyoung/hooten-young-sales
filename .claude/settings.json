@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p .claude && echo \"[$(date -u +%Y-%m-%dT%H:%M:%SZ)] session ended\" >> .claude/session.log"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.command // \"\"' | grep -Eq '(^|[^a-zA-Z0-9_])rm[[:space:]]+(-[a-zA-Z]*[rf][a-zA-Z]*)+[[:space:]]+(/|~|\\$HOME)|git[[:space:]]+push[[:space:]]+.*--force.*\\b(main|master)\\b|git[[:space:]]+push[[:space:]]+--force[[:space:]]+.*\\b(main|master)\\b|(cat|less|more|head|tail|bat|source|\\.)[[:space:]]+[^[:space:]]*\\.env\\b' && { echo '{\"decision\":\"block\",\"reason\":\"Blocked destructive command (rm -rf on /, ~, or $HOME; force-push to main; or reading/sourcing .env). Review before running.\"}'; exit 0; } || exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}
