@@ -43,7 +43,9 @@ Thumbs.db
 
 # Docs (not needed in image)
 docs/
-README.md
+# Note: README.md is intentionally NOT excluded — pyproject.toml references it
+# (readme = "README.md") and hatchling needs it during `uv sync` to build the
+# package metadata. The file is small; harmless to include.
 
 # Tests (image only needs the runtime code)
 tests/
