@@ -67,8 +67,6 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    outputs:
-      image: ${{ steps.image.outputs.image }}
     steps:
       - uses: actions/checkout@v4
 
@@ -85,12 +83,13 @@ jobs:
         run: gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
 
       - name: Build and push image
-        id: image
+        # Image URI deterministically reconstructed from env + github.sha
+        # in each job below — no cross-job outputs needed.
         run: |
           IMAGE="${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
           docker build -t "$IMAGE" .
           docker push "$IMAGE"
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "Pushed $IMAGE"
 
   deploy-dev:
     name: Deploy to dev
@@ -112,12 +111,9 @@ jobs:
         uses: google-github-actions/deploy-cloudrun@v2
         with:
           service: hy-sales-api-dev
+          image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           region: ${{ env.GCP_REGION }}
-          # --image goes in flags rather than the top-level `image:` input
-          # to avoid an issue where the action drops --image from the
-          # generated gcloud command when the service already exists.
           flags: |
-            --image=${{ needs.build.outputs.image }}
             --allow-unauthenticated
             --service-account=${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
             --add-cloudsql-instances=${{ secrets.GCP_PROJECT_ID }}:${{ env.GCP_REGION }}:hy-dev
@@ -151,10 +147,9 @@ jobs:
         uses: google-github-actions/deploy-cloudrun@v2
         with:
           service: hy-sales-api-prod
+          image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           region: ${{ env.GCP_REGION }}
-          # See note on dev: --image in flags.
           flags: |
-            --image=${{ needs.build.outputs.image }}
             --allow-unauthenticated
             --service-account=${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
             --add-cloudsql-instances=${{ secrets.GCP_PROJECT_ID }}:${{ env.GCP_REGION }}:hy-prod
