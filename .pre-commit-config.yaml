@@ -1,0 +1,30 @@
+# Pre-commit hooks for hy-sales.
+#
+# One-time install:   uv run pre-commit install
+# Run on demand:      uv run pre-commit run --all-files
+#
+# These run before every commit. The same checks run in CI on PRs.
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.7.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: uv run mypy src
+        language: system
+        pass_filenames: false
+        types: [python]
+
+      - id: pytest
+        name: pytest
+        entry: uv run pytest -q
+        language: system
+        pass_filenames: false
+        types: [python]

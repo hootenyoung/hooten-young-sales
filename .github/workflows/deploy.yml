@@ -1,0 +1,131 @@
+name: Deploy
+
+# Triggers:
+#   - push to main          -> deploy to dev (auto)
+#   - push tag v*.*.*       -> deploy to prod (gated by GitHub Environment approval)
+#   - manual workflow_dispatch (override)
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Which environment to deploy to"
+        required: true
+        type: choice
+        options: [dev, prod]
+        default: dev
+
+env:
+  GCP_REGION: us-central1
+  ARTIFACT_REPO: hooten-young
+  IMAGE_NAME: hy-sales-api
+
+jobs:
+  build:
+    name: Build & push image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP via Workload Identity Federation
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push image
+        id: image
+        run: |
+          IMAGE="${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+  deploy-dev:
+    name: Deploy to dev
+    needs: build
+    if: |
+      github.ref == 'refs/heads/main' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+    environment: dev
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Deploy to Cloud Run (dev)
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: hy-sales-api-dev
+          image: ${{ needs.build.outputs.image }}
+          region: ${{ env.GCP_REGION }}
+          # CORS regex in the app already permits *.run.app — fine for dev.
+          # Tighten before public exposure.
+          flags: |
+            --allow-unauthenticated
+            --service-account=${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+            --add-cloudsql-instances=${{ secrets.GCP_PROJECT_ID }}:${{ env.GCP_REGION }}:hy-dev
+            --min-instances=0
+            --max-instances=4
+            --memory=512Mi
+            --cpu=1
+          env_vars: |-
+            APP_ENV=dev
+            LOG_LEVEL=INFO
+          secrets: |-
+            DATABASE_URL=DATABASE_URL_DEV:latest
+
+  deploy-prod:
+    name: Deploy to prod
+    needs: build
+    if: |
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod')
+    environment: prod
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Deploy to Cloud Run (prod)
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: hy-sales-api-prod
+          image: ${{ needs.build.outputs.image }}
+          region: ${{ env.GCP_REGION }}
+          flags: |
+            --allow-unauthenticated
+            --service-account=${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+            --add-cloudsql-instances=${{ secrets.GCP_PROJECT_ID }}:${{ env.GCP_REGION }}:hy-prod
+            --min-instances=0
+            --max-instances=10
+            --memory=512Mi
+            --cpu=1
+          env_vars: |-
+            APP_ENV=prod
+            LOG_LEVEL=INFO
+          secrets: |-
+            DATABASE_URL=DATABASE_URL_PROD:latest

@@ -1,0 +1,62 @@
+# Version control
+.git
+.gitignore
+
+# Local environment
+.env
+.env.local
+.env.*.local
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Test + lint caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# IDE / editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Claude Code config
+.claude/
+.mcp.json
+
+# Docs (not needed in image)
+docs/
+README.md
+
+# Tests (image only needs the runtime code)
+tests/
+
+# Migrations are executed against the DB manually, not from the container
+db/
+
+# Scripts (one-off CLIs, not needed at runtime)
+scripts/
+
+# CI/CD config (not needed at runtime)
+.github/
+
+# Dockerfile itself
+Dockerfile
+.dockerignore

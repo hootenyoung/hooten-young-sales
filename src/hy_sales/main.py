@@ -1,0 +1,72 @@
+"""FastAPI application entrypoint.
+
+Run locally:
+
+    uv run uvicorn hy_sales.main:app --reload --port 8000
+"""
+
+from __future__ import annotations
+
+import logging
+
+import structlog
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from hy_sales import __version__
+from hy_sales.api.depletions import router as depletions_router
+from hy_sales.api.health import router as health_router
+from hy_sales.api.sales import router as sales_router
+from hy_sales.settings import get_settings
+
+
+def _configure_logging(level: str) -> None:
+    """Configure structlog + stdlib logging."""
+    log_level = getattr(logging, level.upper(), logging.INFO)
+    logging.basicConfig(format="%(message)s", level=log_level)
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(log_level),
+        cache_logger_on_first_use=True,
+    )
+
+
+def create_app() -> FastAPI:
+    """Build the FastAPI app instance."""
+    settings = get_settings()
+    _configure_logging(settings.log_level)
+
+    fastapi_app = FastAPI(
+        title="Hooten Young Sales API",
+        version=__version__,
+        description=(
+            "Sales + depletions backend for the Hooten Young dashboard. "
+            "See CLAUDE.md for project context."
+        ),
+    )
+    # CORS — let the dashboard SPA call us from its own origin.
+    # In local dev, the Vite proxy handles routing so CORS doesn't matter,
+    # but Cloud Run puts each service on a separate origin.
+    fastapi_app.add_middleware(
+        CORSMiddleware,
+        # TODO: tighten to the actual dashboard origin(s) once we have them.
+        # For dev + Cloud Run preview, allow_origin_regex matches *.run.app
+        # and localhost. Update before the prod release.
+        allow_origin_regex=r"^https?://(localhost(:\d+)?|.*\.run\.app)$",
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+    )
+
+    fastapi_app.include_router(health_router)
+    fastapi_app.include_router(sales_router)
+    fastapi_app.include_router(depletions_router)
+    return fastapi_app
+
+
+app = create_app()
