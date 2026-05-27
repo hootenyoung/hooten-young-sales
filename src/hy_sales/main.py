@@ -50,14 +50,19 @@ def create_app() -> FastAPI:
         ),
     )
     # CORS — let the dashboard SPA call us from its own origin.
-    # In local dev, the Vite proxy handles routing so CORS doesn't matter,
-    # but Cloud Run puts each service on a separate origin.
+    # Allowed origins:
+    #   - localhost (any port) for local dev
+    #   - *.run.app for Cloud Run direct URLs (used until DNS is wired)
+    #   - ops.hootenyoung.com (prod) + ops-dev.hootenyoung.com (dev)
     fastapi_app.add_middleware(
         CORSMiddleware,
-        # TODO: tighten to the actual dashboard origin(s) once we have them.
-        # For dev + Cloud Run preview, allow_origin_regex matches *.run.app
-        # and localhost. Update before the prod release.
-        allow_origin_regex=r"^https?://(localhost(:\d+)?|.*\.run\.app)$",
+        allow_origin_regex=(
+            r"^https?://("
+            r"localhost(:\d+)?"
+            r"|.*\.run\.app"
+            r"|(ops|ops-dev)\.hootenyoung\.com"
+            r")$"
+        ),
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["*"],
