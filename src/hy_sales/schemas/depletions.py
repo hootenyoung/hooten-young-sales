@@ -154,6 +154,9 @@ class AccountMonthlyGridRow(BaseModel):
     county: str | None
     zip_code: str | None
     distributor_code: str | None
+    # Broker premises classification ('ON' / 'OFF' / 'NA' / None) so
+    # the heatmap row can render the channel badge next to the name.
+    premises_type: str | None
     total_9l: Decimal
     months_active: int
     frequency: str

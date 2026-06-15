@@ -317,6 +317,7 @@ async def get_new_vs_lost_accounts(
             "state_code": row.state_code,
             "city": row.city,
             "distributor_name": row.distributor_code,
+            "premises_type": row.premises_type,
             "cases_9l": cases,
         }
 
@@ -754,6 +755,7 @@ async def get_product_performance(
             DepFact.account_id.label("account_id"),
             DepAccount.name.label("account_name"),
             DepAccount.state_code.label("state_code"),
+            DepAccount.premises_type.label("premises_type"),
             func.coalesce(func.sum(DepFact.cases_9l), 0).label("account_9l"),
         )
         .select_from(DepFact)
@@ -763,6 +765,7 @@ async def get_product_performance(
             DepFact.account_id,
             DepAccount.name,
             DepAccount.state_code,
+            DepAccount.premises_type,
         )
     )
     for clause in range_clauses:
@@ -792,6 +795,7 @@ async def get_product_performance(
                 acct_rank.c.account_id,
                 acct_rank.c.account_name,
                 acct_rank.c.state_code,
+                acct_rank.c.premises_type,
                 acct_rank.c.account_9l,
                 acct_rank.c.rn,
             ).where(acct_rank.c.rn <= 3)
@@ -804,6 +808,7 @@ async def get_product_performance(
                 "account_id": r.account_id,
                 "name": r.account_name,
                 "state_code": r.state_code,
+                "premises_type": r.premises_type,
                 "cases_9l": r.account_9l,
             }
         )
@@ -1266,6 +1271,7 @@ async def get_state_performance(
             DepFact.account_id.label("account_id"),
             DepAccount.name.label("account_name"),
             DepAccount.city.label("city"),
+            DepAccount.premises_type.label("premises_type"),
             func.coalesce(func.sum(DepFact.cases_9l), 0).label("acct_9l"),
         )
         .select_from(DepFact)
@@ -1276,6 +1282,7 @@ async def get_state_performance(
             DepFact.account_id,
             DepAccount.name,
             DepAccount.city,
+            DepAccount.premises_type,
         )
     )
     for clause in range_clauses:
@@ -1287,6 +1294,7 @@ async def get_state_performance(
             acct_subq_cte.c.account_id,
             acct_subq_cte.c.account_name,
             acct_subq_cte.c.city,
+            acct_subq_cte.c.premises_type,
             acct_subq_cte.c.acct_9l,
             func.row_number()
             .over(
@@ -1305,6 +1313,7 @@ async def get_state_performance(
                 acct_rank.c.account_id,
                 acct_rank.c.account_name,
                 acct_rank.c.city,
+                acct_rank.c.premises_type,
                 acct_rank.c.acct_9l,
             ).where(acct_rank.c.rn <= 3)
         )
@@ -1316,6 +1325,7 @@ async def get_state_performance(
                 "account_id": r.account_id,
                 "name": r.account_name,
                 "city": r.city,
+                "premises_type": r.premises_type,
                 "cases_9l": r.acct_9l,
             }
         )

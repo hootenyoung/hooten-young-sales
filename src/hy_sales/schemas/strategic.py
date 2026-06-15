@@ -267,6 +267,7 @@ class AccountBrief(BaseModel):
     state_code: str | None
     city: str | None
     distributor_name: str | None
+    premises_type: str | None
     cases_9l: Decimal
 
 
@@ -354,6 +355,7 @@ class ProductTopAccount(BaseModel):
     account_id: int
     name: str
     state_code: str | None
+    premises_type: str | None
     cases_9l: Decimal
     share: float  # 0..1 of this SKU's total
 
@@ -551,6 +553,7 @@ class StateTopAccount(BaseModel):
     account_id: int
     name: str
     city: str | None
+    premises_type: str | None
     cases_9l: Decimal
     share: float  # 0..1 of this state's total
 

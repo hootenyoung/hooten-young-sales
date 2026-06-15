@@ -251,6 +251,7 @@ async def get_account_monthly_grid(
             DepAccount.county.label("county"),
             DepAccount.zip_code.label("zip_code"),
             DepAccount.distributor_code.label("distributor_code"),
+            DepAccount.premises_type.label("premises_type"),
             func.coalesce(func.sum(DepFact.cases_9l), 0).label("total_9l"),
         )
         .select_from(DepFact)
@@ -264,6 +265,7 @@ async def get_account_monthly_grid(
             DepAccount.county,
             DepAccount.zip_code,
             DepAccount.distributor_code,
+            DepAccount.premises_type,
         )
         .order_by(func.sum(DepFact.cases_9l).desc())
         .limit(limit)
@@ -366,6 +368,7 @@ async def get_account_monthly_grid(
                 "county": top.county,
                 "zip_code": top.zip_code,
                 "distributor_code": top.distributor_code,
+                "premises_type": top.premises_type,
                 "total_9l": top.total_9l,
                 "months_active": active,
                 "frequency": _frequency(active),
