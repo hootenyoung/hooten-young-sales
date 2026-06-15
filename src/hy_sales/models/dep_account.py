@@ -26,7 +26,7 @@ class DepAccount(Base, DimMixin):
     __tablename__ = "accounts"
     __table_args__ = (
         CheckConstraint(
-            "premises_type IS NULL OR premises_type IN ('ON', 'OFF')",
+            "premises_type IS NULL OR premises_type IN ('ON', 'OFF', 'NA')",
             name="chk_dep_accounts_premises",
         ),
         UniqueConstraint(

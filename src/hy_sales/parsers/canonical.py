@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class ParsedSalesLine(BaseModel):
@@ -60,7 +60,30 @@ class ParsedDepletionRow(BaseModel):
     account_county: str | None = None
     account_zip: str | None = None
     distributor_code: str | None
+    # Broker's premises classification:
+    #   'ON'  — on-premises (bars, restaurants)
+    #   'OFF' — off-premises (liquor stores, retail)
+    #   'NA'  — broker actively classified as not-applicable (clubs,
+    #           military exchanges, cigar lounges, etc.). Distinct from
+    #           NULL, which means "we don't have this info" — preserve
+    #           NA as its own state so the distinction is queryable.
+    #   None  — source layout doesn't carry the column, or the cell
+    #           was empty / whitespace / an unrecognized string.
+    premises_type: str | None = None
     product_raw_text: str
     period_month: date
     cases_9l: Decimal
     cases_physical: Decimal | None = None
+
+    @field_validator("premises_type", mode="before")
+    @classmethod
+    def _validate_premises_type(cls, v: str | None) -> str | None:
+        """Coerce premises to 'ON' / 'OFF' / 'NA' / None.
+
+        Anything outside the three real values — empty string, weird
+        broker codes — collapses to None.
+        """
+        if v is None:
+            return None
+        s = str(v).strip().upper()
+        return s if s in {"ON", "OFF", "NA"} else None

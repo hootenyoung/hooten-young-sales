@@ -99,6 +99,9 @@ class _AccountFields:
     zip_code: str | None = None
     dist_state_code: str | None = None
     distributor_code: str | None = None
+    # 'ON' / 'OFF' / None — normalized by the parser. None when the
+    # source file doesn't carry this column.
+    premises_type: str | None = None
 
 
 # ----------------------------------------------------------------
@@ -265,7 +268,15 @@ async def _bulk_resolve_accounts(
                 zip_code=r.account_zip,
                 dist_state_code=r.dist_state_code,
                 distributor_code=r.distributor_code,
+                premises_type=r.premises_type,
             )
+        else:
+            # Multiple rows per account (one per product x month). If
+            # this row has a non-null premises_type and the first row
+            # we saw was null, promote — the source file is usually
+            # consistent per account but be defensive.
+            if fields_by_key[key].premises_type is None and r.premises_type is not None:
+                fields_by_key[key].premises_type = r.premises_type
 
     out: dict[AccountKey, int] = {}
 
@@ -320,6 +331,13 @@ async def _bulk_resolve_accounts(
             acc.dist_state_code = fields.dist_state_code
         if fields.distributor_code is not None and acc.distributor_code != fields.distributor_code:
             acc.distributor_code = fields.distributor_code
+        # premises_type uses a NULL-promotion policy: only set when the
+        # DB value is currently NULL. We never overwrite a known
+        # classification — a future file with a typo or missing column
+        # shouldn't silently wipe what we already have. Real
+        # reclassifications can be done manually.
+        if acc.premises_type is None and fields.premises_type is not None:
+            acc.premises_type = fields.premises_type
         out[key] = acc.id
 
     # Insert the missing accounts in one shot.
@@ -339,6 +357,7 @@ async def _bulk_resolve_accounts(
                 "zip_code": fields.zip_code,
                 "dist_state_code": fields.dist_state_code,
                 "distributor_code": fields.distributor_code,
+                "premises_type": fields.premises_type,
             }
         )
         missing_keys.append(key)
