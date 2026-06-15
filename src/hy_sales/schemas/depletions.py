@@ -111,11 +111,29 @@ class TopAccountsResponse(BaseModel):
 # ----------------------------------------------------------------
 
 
+class AccountMonthlyProductBreakdown(BaseModel):
+    """One product line inside a (account, month) cell.
+
+    Surfaced so the heatmap's cell-hover tooltip can answer "what
+    did they actually order that month?" beyond just the total 9L.
+    Sorted by ``cases_9l`` desc when emitted by the service.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    product_id: int
+    product_name: str
+    cases_9l: Decimal
+
+
 class AccountMonthlyVolume(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     period: date
     cases_9l: Decimal
+    # Per-month product mix for this account. Empty list when the
+    # account didn't move any product that month.
+    products: list[AccountMonthlyProductBreakdown]
 
 
 class AccountMonthlyGridRow(BaseModel):
@@ -125,8 +143,13 @@ class AccountMonthlyGridRow(BaseModel):
 
     account_id: int
     name: str
+    # Full mailing-address fields surfaced so the heatmap's account
+    # label tooltip can show the rep where to call / visit.
+    address: str | None
     state_code: str | None
     city: str | None
+    county: str | None
+    zip_code: str | None
     distributor_code: str | None
     total_9l: Decimal
     months_active: int

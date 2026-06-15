@@ -483,3 +483,269 @@ class ProductPerformanceResponse(BaseModel):
     # Portfolio concentration — share of the top-3 SKUs by 9L. UI flags
     # > 0.7 as "narrow portfolio".
     top_3_share: float
+
+
+# ----------------------------------------------------------------
+# State Performance (depletions — strategic per-state view)
+# ----------------------------------------------------------------
+
+# Re-used momentum tier alias for state-level signals.
+StateMomentum = str  # 'rising' | 'steady' | 'slipping' | 'declining' | 'new'
+
+
+class StateMonthlyVolume(BaseModel):
+    """One bar in the per-state 12-month sparkline."""
+
+    model_config = ConfigDict(frozen=True)
+
+    period: date
+    cases_9l: Decimal
+
+
+class StateYearlyVolume(BaseModel):
+    """One bar in the per-state yearly comparison.
+
+    ``is_ytd`` is True for the calendar year that contains the
+    reference month — the value is year-to-date rather than a full
+    twelve months, and the UI marks the bar accordingly so the
+    comparison isn't read as apples-to-apples.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    year: int
+    cases_9l: Decimal
+    is_ytd: bool
+    # Count of distinct months included. For YTD years the UI shows
+    # "Jan-Jun 2026" using this count.
+    months_covered: int
+
+
+class StateTopProduct(BaseModel):
+    """One row in the per-state top-products list (max 3)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    product_id: int
+    product_name: str
+    cases_9l: Decimal
+    share: float  # 0..1 of this state's total
+
+
+class StateTopAccount(BaseModel):
+    """One row in the per-state top-accounts list (max 3)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    account_id: int
+    name: str
+    city: str | None
+    cases_9l: Decimal
+    share: float  # 0..1 of this state's total
+
+
+class StateTopDistributor(BaseModel):
+    """One row in the per-state top-distributors list (max 3)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    distributor_code: str | None
+    cases_9l: Decimal
+    share: float  # 0..1 of this state's total
+    account_count: int
+
+
+class StatePerformanceItem(BaseModel):
+    """A single state's strategic depletion summary.
+
+    Mirrors :class:`ProductPerformanceItem` field-by-field so the UI
+    can share components. The "entity" is a state instead of a SKU.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    state_code: str
+    # Headline volume + share
+    cases_9l: Decimal
+    cases_physical: Decimal
+    pct_of_9l: float
+
+    # Distribution shape — accounts in this state, distinct SKUs
+    # sold there, and avg 9L per account (depth).
+    account_count: int
+    product_count: int  # distinct SKUs sold in this state
+    avg_9l_per_account: Decimal
+
+    # Top SKU per state — surfaces the mix story ("FL leans on
+    # 12 Year Amer at 41% of state volume").
+    top_product_id: int | None
+    top_product_name: str | None
+    top_product_share: float  # 0..1
+
+    # Concentration — top single-account share within the state.
+    top_account_id: int | None
+    top_account_name: str | None
+    top_account_share: float  # 0..1
+
+    # Distributor concentration — losing the wholesaler hurts more
+    # than losing one outlet.
+    top_distributor_code: str | None
+    top_distributor_share: float
+    distributor_count: int
+
+    # Top 3 lists for the deep-dive panel.
+    top_products: list[StateTopProduct]
+    top_accounts: list[StateTopAccount]
+    top_distributors: list[StateTopDistributor]
+
+    # Momentum window — recent 3M vs prior 3M (within the requested
+    # range, anchored at the reference month).
+    recent_3m_9l: Decimal
+    prior_3m_9l: Decimal
+    velocity_pct: float | None
+    momentum: StateMomentum
+
+    # Year-over-year smooths the seasonal noise QoQ catches.
+    recent_12m_9l: Decimal
+    prior_12m_9l: Decimal
+    yoy_pct: float | None
+
+    # Account momentum — accounts gained / churned / active in the
+    # last 3M for this state.
+    accounts_active_90d: int
+    accounts_gained_90d: int
+    accounts_churned_90d: int
+
+    # Lifecycle
+    first_active: date | None
+    last_active: date | None
+    months_active_12m: int
+
+    # Peak month inside the 12-month sparkline window.
+    peak_month: date | None
+    peak_month_9l: Decimal
+
+    # 12-month monthly series for the row sparkline.
+    monthly_series: list[StateMonthlyVolume]
+
+    # Calendar-year aggregates — one entry per year present in the
+    # data, oldest first. The latest entry is YTD if it includes the
+    # reference month. Drives the top-of-section grouped-bar chart.
+    yearly_history: list[StateYearlyVolume]
+
+
+class StatePerformanceResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    reference_date: date
+    states: list[StatePerformanceItem]
+    total_9l: Decimal
+    # Geographic concentration — share of the top-3 states by 9L. UI
+    # flags > 0.7 as "narrow footprint".
+    top_3_share: float
+
+
+# ----------------------------------------------------------------
+# Account Performance (depletions — strategic per-account view)
+# ----------------------------------------------------------------
+
+# Re-used momentum tier — keeps the badge taxonomy consistent across
+# entity types (product / state / account).
+AccountMomentum = str  # 'rising' | 'steady' | 'slipping' | 'declining' | 'new'
+
+
+class AccountMonthlyVolume(BaseModel):
+    """One bar in the per-account 12-month sparkline."""
+
+    model_config = ConfigDict(frozen=True)
+
+    period: date
+    cases_9l: Decimal
+
+
+class AccountTopProduct(BaseModel):
+    """One row in the per-account top-products list (max 3)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    product_id: int
+    product_name: str
+    cases_9l: Decimal
+    share: float  # 0..1 of this account's total
+
+
+class AccountPerformanceItem(BaseModel):
+    """A single account's strategic depletion summary.
+
+    Mirrors the per-SKU / per-state items field-by-field where
+    sensible so the dashboard can share visual primitives.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    account_id: int
+    name: str
+
+    # Location / channel — full mailing address surfaced so the UI's
+    # location hover tooltip can show the rep where to drive / call.
+    address: str | None
+    state_code: str | None
+    city: str | None
+    county: str | None
+    zip_code: str | None
+    distributor_code: str | None
+
+    # Headline volume + share
+    cases_9l: Decimal
+    cases_physical: Decimal
+    pct_of_9l: float  # 0..1 of total portfolio in the requested range
+
+    # Distribution shape — number of distinct SKUs the account buys
+    # and avg 9L per active month (depth proxy at the account level).
+    product_count: int
+    avg_9l_per_active_month: Decimal
+
+    # Top SKU — what the account leans on.
+    top_product_id: int | None
+    top_product_name: str | None
+    top_product_share: float  # 0..1
+    top_products: list[AccountTopProduct]
+
+    # Momentum window — recent 3M ending at the reference month vs
+    # the 3M before.
+    recent_3m_9l: Decimal
+    prior_3m_9l: Decimal
+    velocity_pct: float | None
+    momentum: AccountMomentum
+
+    # Year-over-year (recent 12M vs prior 12M).
+    recent_12m_9l: Decimal
+    prior_12m_9l: Decimal
+    yoy_pct: float | None
+
+    # Lifecycle bounds within the range.
+    first_active: date | None
+    last_active: date | None
+    months_active_12m: int
+
+    # Peak month in the 12-month sparkline window.
+    peak_month: date | None
+    peak_month_9l: Decimal
+
+    # Days since last non-zero depletion, relative to the reference
+    # date. Powers the Dark health flag and the lifecycle facts.
+    days_since: int | None
+
+    # 12-month monthly series for the row sparkline.
+    monthly_series: list[AccountMonthlyVolume]
+
+
+class AccountPerformanceResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    reference_date: date
+    accounts: list[AccountPerformanceItem]
+    total_9l: Decimal
+    # Concentration — share of the top-10 accounts by 9L. UI flags
+    # > 0.5 as "narrow customer base".
+    top_10_share: float

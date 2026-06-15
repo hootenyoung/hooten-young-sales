@@ -245,8 +245,11 @@ async def get_account_monthly_grid(
         select(
             DepAccount.id.label("account_id"),
             DepAccount.name.label("name"),
+            DepAccount.address.label("address"),
             DepAccount.state_code.label("state_code"),
             DepAccount.city.label("city"),
+            DepAccount.county.label("county"),
+            DepAccount.zip_code.label("zip_code"),
             DepAccount.distributor_code.label("distributor_code"),
             func.coalesce(func.sum(DepFact.cases_9l), 0).label("total_9l"),
         )
@@ -255,8 +258,11 @@ async def get_account_monthly_grid(
         .group_by(
             DepAccount.id,
             DepAccount.name,
+            DepAccount.address,
             DepAccount.state_code,
             DepAccount.city,
+            DepAccount.county,
+            DepAccount.zip_code,
             DepAccount.distributor_code,
         )
         .order_by(func.sum(DepFact.cases_9l).desc())
@@ -290,6 +296,45 @@ async def get_account_monthly_grid(
         grid_stmt = grid_stmt.where(clause)
     grid_rows = (await session.execute(grid_stmt)).all()
 
+    # Pass 2 — per-(account, product, month) breakdown for the SAME
+    # top accounts. Only non-zero cells are returned so the response
+    # payload doesn't carry empty product lists for silent months.
+    # Powers the heatmap's cell-hover tooltip ("what did they actually
+    # order in Jul '25?").
+    breakdown_stmt = (
+        select(
+            DepFact.account_id.label("account_id"),
+            DepFact.period_month.label("period_month"),
+            DepFact.product_id.label("product_id"),
+            DepProduct.full_name.label("product_name"),
+            func.coalesce(func.sum(DepFact.cases_9l), 0).label("cases_9l"),
+        )
+        .select_from(DepFact)
+        .join(DepProduct, DepProduct.id == DepFact.product_id)
+        .where(DepFact.account_id.in_(top_ids))
+        .where(DepFact.cases_9l != 0)
+        .group_by(
+            DepFact.account_id,
+            DepFact.period_month,
+            DepFact.product_id,
+            DepProduct.full_name,
+        )
+        .order_by(DepFact.account_id, DepFact.period_month, func.sum(DepFact.cases_9l).desc())
+    )
+    for clause in clauses:
+        breakdown_stmt = breakdown_stmt.where(clause)
+    breakdown_rows = (await session.execute(breakdown_stmt)).all()
+    breakdown_by_cell: dict[tuple[int, date], list[dict[str, Any]]] = {}
+    for r in breakdown_rows:
+        key = (r.account_id, r.period_month)
+        breakdown_by_cell.setdefault(key, []).append(
+            {
+                "product_id": r.product_id,
+                "product_name": r.product_name,
+                "cases_9l": r.cases_9l,
+            }
+        )
+
     # Build dense series per account and the unified month axis.
     by_account: dict[int, dict[date, Decimal]] = {aid: {} for aid in top_ids}
     months_seen: set[date] = set()
@@ -315,14 +360,22 @@ async def get_account_monthly_grid(
             {
                 "account_id": top.account_id,
                 "name": top.name,
+                "address": top.address,
                 "state_code": top.state_code,
                 "city": top.city,
+                "county": top.county,
+                "zip_code": top.zip_code,
                 "distributor_code": top.distributor_code,
                 "total_9l": top.total_9l,
                 "months_active": active,
                 "frequency": _frequency(active),
                 "monthly_volumes": [
-                    {"period": m, "cases_9l": series.get(m, Decimal("0"))} for m in months
+                    {
+                        "period": m,
+                        "cases_9l": series.get(m, Decimal("0")),
+                        "products": breakdown_by_cell.get((top.account_id, m), []),
+                    }
+                    for m in months
                 ],
             }
         )

@@ -21,10 +21,12 @@ from hy_sales.schemas.depletions import (
     TopAccountsResponse,
 )
 from hy_sales.schemas.strategic import (
+    AccountPerformanceResponse,
     FollowUpTrackerResponse,
     GrowthDeclineResponse,
     NewVsLostAccountsResponse,
     ProductPerformanceResponse,
+    StatePerformanceResponse,
     VelocityAnalysisResponse,
 )
 from hy_sales.services.depletions_queries import (
@@ -36,10 +38,12 @@ from hy_sales.services.depletions_queries import (
     get_top_accounts,
 )
 from hy_sales.services.depletions_strategic import (
+    get_account_performance,
     get_follow_up_tracker,
     get_growth_decline,
     get_new_vs_lost_accounts,
     get_product_performance,
+    get_state_performance,
     get_velocity_analysis,
 )
 
@@ -227,7 +231,7 @@ async def account_monthly_grid(
     session: Annotated[AsyncSession, Depends(get_session)],
     date_from: DateFromParam = None,
     date_to: DateToParam = None,
-    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
 ) -> AccountMonthlyGridResponse:
     data = await get_account_monthly_grid(
         session, date_from=date_from, date_to=date_to, limit=limit
@@ -264,3 +268,43 @@ async def product_performance(
 ) -> ProductPerformanceResponse:
     data = await get_product_performance(session, date_from=date_from, date_to=date_to)
     return ProductPerformanceResponse.model_validate(data)
+
+
+@router.get(
+    "/state-performance",
+    response_model=StatePerformanceResponse,
+    summary="Strategic per-state view — volume, depth, top SKU/account/distributor, "
+    "QoQ + YoY momentum, account flow (gained/churned 90d), and a 12-month sparkline.",
+)
+async def state_performance(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    date_from: DateFromParam = None,
+    date_to: DateToParam = None,
+) -> StatePerformanceResponse:
+    data = await get_state_performance(session, date_from=date_from, date_to=date_to)
+    return StatePerformanceResponse.model_validate(data)
+
+
+@router.get(
+    "/account-performance",
+    response_model=AccountPerformanceResponse,
+    summary="Strategic top-N accounts view — volume, share, depth, top SKUs, "
+    "QoQ + YoY momentum, lifecycle, peak month, and a 12-month sparkline.",
+)
+async def account_performance(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    date_from: DateFromParam = None,
+    date_to: DateToParam = None,
+    limit: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=5000,
+            description=(
+                "Number of top accounts to return. " "Set high to load all and let the UI paginate."
+            ),
+        ),
+    ] = 50,
+) -> AccountPerformanceResponse:
+    data = await get_account_performance(session, date_from=date_from, date_to=date_to, limit=limit)
+    return AccountPerformanceResponse.model_validate(data)

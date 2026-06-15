@@ -1116,3 +1116,801 @@ async def get_product_performance(
         "total_9l": total_9l,
         "top_3_share": top_3_share,
     }
+
+
+# ----------------------------------------------------------------
+# State Performance — strategic per-state view
+# ----------------------------------------------------------------
+
+
+def _classify_state_momentum(velocity_pct: float | None) -> str:
+    """Same tier scheme as products — keeps the UI's badge taxonomy
+    consistent across entity types."""
+    return _classify_product_momentum(velocity_pct)
+
+
+async def get_state_performance(
+    session: AsyncSession,
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> dict[str, Any]:
+    """Rich per-state performance view that mirrors get_product_performance.
+
+    Reference month: ``date_to`` if provided else the latest
+    ``period_month``. The 12-month sparkline + YoY windows are
+    anchored to it; the date range filter is applied to all
+    aggregates so the view follows the user's range selection.
+    """
+    latest: date | None = await session.scalar(select(func.max(DepFact.period_month)))
+    ref: date = date_to or latest or date.today()
+    ref_month_start = date(ref.year, ref.month, 1)
+
+    # 12-month sparkline axis.
+    month_axis: list[date] = []
+    y, m = ref_month_start.year, ref_month_start.month
+    for i in range(11, -1, -1):
+        nm = m - i
+        ny = y
+        while nm <= 0:
+            nm += 12
+            ny -= 1
+        month_axis.append(date(ny, nm, 1))
+
+    # 24-month axis (head 12 = prior year for YoY).
+    month_axis_24: list[date] = []
+    for i in range(23, -1, -1):
+        nm = m - i
+        ny = y
+        while nm <= 0:
+            nm += 12
+            ny -= 1
+        month_axis_24.append(date(ny, nm, 1))
+    earliest_month = month_axis_24[0]
+    recent_window_start = month_axis[-3]
+    prior_window_start = month_axis[-6]
+
+    range_clauses: list[Any] = []
+    if date_from is not None:
+        range_clauses.append(DepFact.period_month >= date_from)
+    if date_to is not None:
+        range_clauses.append(DepFact.period_month <= date_to)
+
+    # Pass 1 — per-state aggregates. NULL state_codes filtered out
+    # (depletions with no state attribution don't belong on a map).
+    agg_stmt = (
+        select(
+            DepAccount.state_code.label("state_code"),
+            func.coalesce(func.sum(DepFact.cases_9l), 0).label("cases_9l"),
+            func.coalesce(func.sum(DepFact.cases_physical), 0).label("cases_physical"),
+            func.count(distinct(DepFact.account_id)).label("account_count"),
+            func.count(distinct(DepFact.product_id)).label("product_count"),
+            func.min(case((DepFact.cases_9l != 0, DepFact.period_month))).label("first_active"),
+            func.max(case((DepFact.cases_9l != 0, DepFact.period_month))).label("last_active"),
+        )
+        .select_from(DepFact)
+        .join(DepAccount, DepAccount.id == DepFact.account_id)
+        .where(DepAccount.state_code.is_not(None))
+        .group_by(DepAccount.state_code)
+        .order_by(func.sum(DepFact.cases_9l).desc())
+    )
+    for clause in range_clauses:
+        agg_stmt = agg_stmt.where(clause)
+    agg_rows = (await session.execute(agg_stmt)).all()
+
+    # Pass 2 — top 3 PRODUCTS per state. Surfaces the mix story.
+    prod_subq = (
+        select(
+            DepAccount.state_code.label("state_code"),
+            DepFact.product_id.label("product_id"),
+            DepProduct.full_name.label("product_name"),
+            func.coalesce(func.sum(DepFact.cases_9l), 0).label("prod_9l"),
+        )
+        .select_from(DepFact)
+        .join(DepAccount, DepAccount.id == DepFact.account_id)
+        .join(DepProduct, DepProduct.id == DepFact.product_id)
+        .where(DepAccount.state_code.is_not(None))
+        .group_by(DepAccount.state_code, DepFact.product_id, DepProduct.full_name)
+    )
+    for clause in range_clauses:
+        prod_subq = prod_subq.where(clause)
+    prod_subq_cte = prod_subq.subquery()
+    prod_rank = (
+        select(
+            prod_subq_cte.c.state_code,
+            prod_subq_cte.c.product_id,
+            prod_subq_cte.c.product_name,
+            prod_subq_cte.c.prod_9l,
+            func.row_number()
+            .over(
+                partition_by=prod_subq_cte.c.state_code,
+                order_by=prod_subq_cte.c.prod_9l.desc().nulls_last(),
+            )
+            .label("rn"),
+        )
+        .select_from(prod_subq_cte)
+        .subquery()
+    )
+    top_prod_rows = (
+        await session.execute(
+            select(
+                prod_rank.c.state_code,
+                prod_rank.c.product_id,
+                prod_rank.c.product_name,
+                prod_rank.c.prod_9l,
+            ).where(prod_rank.c.rn <= 3)
+        )
+    ).all()
+    top_products_by_state: dict[str, list[dict[str, Any]]] = {}
+    for r in top_prod_rows:
+        top_products_by_state.setdefault(r.state_code, []).append(
+            {
+                "product_id": r.product_id,
+                "product_name": r.product_name,
+                "cases_9l": r.prod_9l,
+            }
+        )
+
+    # Pass 3 — top 3 ACCOUNTS per state.
+    acct_subq = (
+        select(
+            DepAccount.state_code.label("state_code"),
+            DepFact.account_id.label("account_id"),
+            DepAccount.name.label("account_name"),
+            DepAccount.city.label("city"),
+            func.coalesce(func.sum(DepFact.cases_9l), 0).label("acct_9l"),
+        )
+        .select_from(DepFact)
+        .join(DepAccount, DepAccount.id == DepFact.account_id)
+        .where(DepAccount.state_code.is_not(None))
+        .group_by(
+            DepAccount.state_code,
+            DepFact.account_id,
+            DepAccount.name,
+            DepAccount.city,
+        )
+    )
+    for clause in range_clauses:
+        acct_subq = acct_subq.where(clause)
+    acct_subq_cte = acct_subq.subquery()
+    acct_rank = (
+        select(
+            acct_subq_cte.c.state_code,
+            acct_subq_cte.c.account_id,
+            acct_subq_cte.c.account_name,
+            acct_subq_cte.c.city,
+            acct_subq_cte.c.acct_9l,
+            func.row_number()
+            .over(
+                partition_by=acct_subq_cte.c.state_code,
+                order_by=acct_subq_cte.c.acct_9l.desc().nulls_last(),
+            )
+            .label("rn"),
+        )
+        .select_from(acct_subq_cte)
+        .subquery()
+    )
+    top_acct_rows = (
+        await session.execute(
+            select(
+                acct_rank.c.state_code,
+                acct_rank.c.account_id,
+                acct_rank.c.account_name,
+                acct_rank.c.city,
+                acct_rank.c.acct_9l,
+            ).where(acct_rank.c.rn <= 3)
+        )
+    ).all()
+    top_accounts_by_state: dict[str, list[dict[str, Any]]] = {}
+    for r in top_acct_rows:
+        top_accounts_by_state.setdefault(r.state_code, []).append(
+            {
+                "account_id": r.account_id,
+                "name": r.account_name,
+                "city": r.city,
+                "cases_9l": r.acct_9l,
+            }
+        )
+
+    # Pass 4 — top 3 DISTRIBUTORS per state + distinct distributor count.
+    dist_subq = (
+        select(
+            DepAccount.state_code.label("state_code"),
+            DepAccount.distributor_code.label("distributor_code"),
+            func.coalesce(func.sum(DepFact.cases_9l), 0).label("dist_9l"),
+            func.count(distinct(DepFact.account_id)).label("dist_account_count"),
+        )
+        .select_from(DepFact)
+        .join(DepAccount, DepAccount.id == DepFact.account_id)
+        .where(DepAccount.state_code.is_not(None))
+        .group_by(DepAccount.state_code, DepAccount.distributor_code)
+    )
+    for clause in range_clauses:
+        dist_subq = dist_subq.where(clause)
+    dist_subq_cte = dist_subq.subquery()
+    dist_rank = (
+        select(
+            dist_subq_cte.c.state_code,
+            dist_subq_cte.c.distributor_code,
+            dist_subq_cte.c.dist_9l,
+            dist_subq_cte.c.dist_account_count,
+            func.row_number()
+            .over(
+                partition_by=dist_subq_cte.c.state_code,
+                order_by=dist_subq_cte.c.dist_9l.desc().nulls_last(),
+            )
+            .label("rn"),
+        )
+        .select_from(dist_subq_cte)
+        .subquery()
+    )
+    top_dist_rows = (
+        await session.execute(
+            select(
+                dist_rank.c.state_code,
+                dist_rank.c.distributor_code,
+                dist_rank.c.dist_9l,
+                dist_rank.c.dist_account_count,
+            ).where(dist_rank.c.rn <= 3)
+        )
+    ).all()
+    top_distributors_by_state: dict[str, list[dict[str, Any]]] = {}
+    for r in top_dist_rows:
+        top_distributors_by_state.setdefault(r.state_code, []).append(
+            {
+                "distributor_code": r.distributor_code,
+                "cases_9l": r.dist_9l,
+                "account_count": r.dist_account_count,
+            }
+        )
+    dist_count_stmt = (
+        select(
+            DepAccount.state_code.label("state_code"),
+            func.count(distinct(DepAccount.distributor_code)).label("dist_count"),
+        )
+        .select_from(DepFact)
+        .join(DepAccount, DepAccount.id == DepFact.account_id)
+        .where(DepAccount.state_code.is_not(None))
+        .group_by(DepAccount.state_code)
+    )
+    for clause in range_clauses:
+        dist_count_stmt = dist_count_stmt.where(clause)
+    dist_count_by_state: dict[str, int] = {
+        r.state_code: r.dist_count for r in (await session.execute(dist_count_stmt)).all()
+    }
+
+    # Pass 5 — 24-month per-state monthly series.
+    series_stmt = (
+        select(
+            DepAccount.state_code.label("state_code"),
+            DepFact.period_month.label("period_month"),
+            func.coalesce(func.sum(DepFact.cases_9l), 0).label("cases_9l"),
+        )
+        .select_from(DepFact)
+        .join(DepAccount, DepAccount.id == DepFact.account_id)
+        .where(DepAccount.state_code.is_not(None))
+        .where(DepFact.period_month >= earliest_month)
+        .where(DepFact.period_month <= ref_month_start)
+        .group_by(DepAccount.state_code, DepFact.period_month)
+    )
+    series_by_state: dict[str, dict[date, Decimal]] = {}
+    for srow in (await session.execute(series_stmt)).all():
+        series_by_state.setdefault(srow.state_code, {})[srow.period_month] = srow.cases_9l
+
+    # Pass 6 — per-(state, account) lifecycle for account momentum.
+    lifecycle_stmt = (
+        select(
+            DepAccount.state_code.label("state_code"),
+            DepFact.account_id.label("account_id"),
+            func.min(case((DepFact.cases_9l != 0, DepFact.period_month))).label("first_active"),
+            func.max(case((DepFact.cases_9l != 0, DepFact.period_month))).label("last_active"),
+        )
+        .select_from(DepFact)
+        .join(DepAccount, DepAccount.id == DepFact.account_id)
+        .where(DepAccount.state_code.is_not(None))
+        .group_by(DepAccount.state_code, DepFact.account_id)
+    )
+    for clause in range_clauses:
+        lifecycle_stmt = lifecycle_stmt.where(clause)
+    lifecycle_rows = (await session.execute(lifecycle_stmt)).all()
+    momentum_by_state: dict[str, dict[str, int]] = {}
+    for lc in lifecycle_rows:
+        if lc.last_active is None:
+            continue
+        slot = momentum_by_state.setdefault(
+            lc.state_code, {"active_90d": 0, "gained_90d": 0, "churned_90d": 0}
+        )
+        if lc.last_active >= recent_window_start:
+            slot["active_90d"] += 1
+            if lc.first_active is not None and lc.first_active >= recent_window_start:
+                slot["gained_90d"] += 1
+        elif lc.last_active >= prior_window_start and lc.last_active < recent_window_start:
+            slot["churned_90d"] += 1
+
+    # Pass 7 — calendar-year aggregates per state. One row per
+    # (state, year) including a count of distinct months covered so
+    # the UI can render "Jan-Jun 2026 (YTD)" labels for partial years.
+    yearly_stmt = (
+        select(
+            DepAccount.state_code.label("state_code"),
+            func.extract("year", DepFact.period_month).label("year"),
+            func.coalesce(func.sum(DepFact.cases_9l), 0).label("cases_9l"),
+            func.count(distinct(DepFact.period_month)).label("months_covered"),
+            func.max(DepFact.period_month).label("max_month"),
+        )
+        .select_from(DepFact)
+        .join(DepAccount, DepAccount.id == DepFact.account_id)
+        .where(DepAccount.state_code.is_not(None))
+        .group_by(DepAccount.state_code, func.extract("year", DepFact.period_month))
+        .order_by(DepAccount.state_code, func.extract("year", DepFact.period_month))
+    )
+    yearly_by_state: dict[str, list[dict[str, Any]]] = {}
+    ref_year = ref.year
+    for yr in (await session.execute(yearly_stmt)).all():
+        year_int = int(yr.year)
+        yearly_by_state.setdefault(yr.state_code, []).append(
+            {
+                "year": year_int,
+                "cases_9l": yr.cases_9l,
+                "months_covered": yr.months_covered,
+                # YTD when this aggregate belongs to the reference
+                # year — the calendar year isn't complete yet.
+                "is_ytd": year_int == ref_year,
+            }
+        )
+
+    # Assemble.
+    items: list[dict[str, Any]] = []
+    total_9l: Decimal = sum((row.cases_9l for row in agg_rows), Decimal("0"))
+    for row in agg_rows:
+        state_code: str = row.state_code
+        series_dict = series_by_state.get(state_code, {})
+        series_values_24: list[Decimal] = [series_dict.get(m, Decimal("0")) for m in month_axis_24]
+        series_values: list[Decimal] = series_values_24[-12:]
+        recent_3m = sum(series_values[-3:], Decimal("0"))
+        prior_3m = sum(series_values[-6:-3], Decimal("0"))
+        velocity_pct: float | None = None
+        if prior_3m > 0:
+            velocity_pct = float((recent_3m - prior_3m) / prior_3m * 100)
+        recent_12m = sum(series_values_24[-12:], Decimal("0"))
+        prior_12m = sum(series_values_24[:12], Decimal("0"))
+        yoy_pct: float | None = None
+        if prior_12m > 0:
+            yoy_pct = float((recent_12m - prior_12m) / prior_12m * 100)
+
+        cases_9l: Decimal = row.cases_9l
+        accounts: int = row.account_count
+        avg_per_account = cases_9l / accounts if accounts > 0 else Decimal("0")
+        share = float(cases_9l / total_9l) if total_9l > 0 else 0.0
+
+        # Top products
+        raw_products = top_products_by_state.get(state_code, [])
+        top_products: list[dict[str, Any]] = [
+            {
+                "product_id": p["product_id"],
+                "product_name": p["product_name"],
+                "cases_9l": p["cases_9l"],
+                "share": (
+                    float(cast(Decimal, p["cases_9l"]) / cases_9l)
+                    if cases_9l > 0 and p["cases_9l"] > 0
+                    else 0.0
+                ),
+            }
+            for p in raw_products
+        ]
+        if top_products:
+            top_prod_id = top_products[0]["product_id"]
+            top_prod_name = top_products[0]["product_name"]
+            top_prod_share = top_products[0]["share"]
+        else:
+            top_prod_id = None
+            top_prod_name = None
+            top_prod_share = 0.0
+
+        # Top accounts
+        raw_accts = top_accounts_by_state.get(state_code, [])
+        top_accounts: list[dict[str, Any]] = [
+            {
+                "account_id": a["account_id"],
+                "name": a["name"],
+                "city": a["city"],
+                "cases_9l": a["cases_9l"],
+                "share": (
+                    float(cast(Decimal, a["cases_9l"]) / cases_9l)
+                    if cases_9l > 0 and a["cases_9l"] > 0
+                    else 0.0
+                ),
+            }
+            for a in raw_accts
+        ]
+        if top_accounts:
+            top_acct_id = top_accounts[0]["account_id"]
+            top_acct_name = top_accounts[0]["name"]
+            top_acct_share = top_accounts[0]["share"]
+        else:
+            top_acct_id = None
+            top_acct_name = None
+            top_acct_share = 0.0
+
+        # Top distributors
+        raw_dists = top_distributors_by_state.get(state_code, [])
+        top_distributors: list[dict[str, Any]] = [
+            {
+                "distributor_code": d["distributor_code"],
+                "cases_9l": d["cases_9l"],
+                "share": (
+                    float(cast(Decimal, d["cases_9l"]) / cases_9l)
+                    if cases_9l > 0 and d["cases_9l"] > 0
+                    else 0.0
+                ),
+                "account_count": d["account_count"],
+            }
+            for d in raw_dists
+        ]
+        if top_distributors:
+            top_dist_code = top_distributors[0]["distributor_code"]
+            top_dist_share = top_distributors[0]["share"]
+        else:
+            top_dist_code = None
+            top_dist_share = 0.0
+        distributor_count = dist_count_by_state.get(state_code, 0)
+
+        momentum_counts = momentum_by_state.get(
+            state_code, {"active_90d": 0, "gained_90d": 0, "churned_90d": 0}
+        )
+
+        months_active_12m = sum(1 for v in series_values if v > 0)
+
+        peak_month: date | None = None
+        peak_month_9l = Decimal("0")
+        for m_date, v in zip(month_axis, series_values, strict=True):
+            if v > peak_month_9l:
+                peak_month_9l = v
+                peak_month = m_date
+
+        items.append(
+            {
+                "state_code": state_code,
+                "cases_9l": cases_9l,
+                "cases_physical": row.cases_physical,
+                "pct_of_9l": share,
+                "account_count": accounts,
+                "product_count": row.product_count,
+                "avg_9l_per_account": avg_per_account,
+                "top_product_id": top_prod_id,
+                "top_product_name": top_prod_name,
+                "top_product_share": top_prod_share,
+                "top_account_id": top_acct_id,
+                "top_account_name": top_acct_name,
+                "top_account_share": top_acct_share,
+                "top_distributor_code": top_dist_code,
+                "top_distributor_share": top_dist_share,
+                "distributor_count": distributor_count,
+                "top_products": top_products,
+                "top_accounts": top_accounts,
+                "top_distributors": top_distributors,
+                "recent_3m_9l": recent_3m,
+                "prior_3m_9l": prior_3m,
+                "velocity_pct": velocity_pct,
+                "momentum": _classify_state_momentum(velocity_pct),
+                "recent_12m_9l": recent_12m,
+                "prior_12m_9l": prior_12m,
+                "yoy_pct": yoy_pct,
+                "accounts_active_90d": momentum_counts["active_90d"],
+                "accounts_gained_90d": momentum_counts["gained_90d"],
+                "accounts_churned_90d": momentum_counts["churned_90d"],
+                "first_active": row.first_active,
+                "last_active": row.last_active,
+                "months_active_12m": months_active_12m,
+                "peak_month": peak_month,
+                "peak_month_9l": peak_month_9l,
+                "monthly_series": [
+                    {"period": m, "cases_9l": v}
+                    for m, v in zip(month_axis, series_values, strict=True)
+                ],
+                "yearly_history": yearly_by_state.get(state_code, []),
+            }
+        )
+
+    top_3_share = 0.0
+    if total_9l > 0:
+        top_3_sum: Decimal = sum(
+            (cast(Decimal, item["cases_9l"]) for item in items[:3]), Decimal("0")
+        )
+        top_3_share = float(top_3_sum / total_9l)
+
+    return {
+        "reference_date": ref,
+        "states": items,
+        "total_9l": total_9l,
+        "top_3_share": top_3_share,
+    }
+
+
+# ----------------------------------------------------------------
+# Account Performance — strategic per-account view
+# ----------------------------------------------------------------
+
+
+def _classify_account_momentum(velocity_pct: float | None) -> str:
+    """Reuse the product/state momentum classifier — same UI badges."""
+    return _classify_product_momentum(velocity_pct)
+
+
+async def get_account_performance(
+    session: AsyncSession,
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Top-N accounts by 9L over the range with rich strategic context.
+
+    Mirrors get_product_performance / get_state_performance: pulls
+    aggregates, top-3 SKUs per account, lifecycle, 24-month series
+    for YoY, and 12-month series for the sparkline — in one shot so
+    the UI never double-fetches.
+    """
+    latest: date | None = await session.scalar(select(func.max(DepFact.period_month)))
+    ref: date = date_to or latest or date.today()
+    ref_month_start = date(ref.year, ref.month, 1)
+
+    # 12-month sparkline axis.
+    month_axis: list[date] = []
+    y, m = ref_month_start.year, ref_month_start.month
+    for i in range(11, -1, -1):
+        nm = m - i
+        ny = y
+        while nm <= 0:
+            nm += 12
+            ny -= 1
+        month_axis.append(date(ny, nm, 1))
+
+    # 24-month axis (head 12 = prior year for YoY).
+    month_axis_24: list[date] = []
+    for i in range(23, -1, -1):
+        nm = m - i
+        ny = y
+        while nm <= 0:
+            nm += 12
+            ny -= 1
+        month_axis_24.append(date(ny, nm, 1))
+    earliest_month = month_axis_24[0]
+
+    range_clauses: list[Any] = []
+    if date_from is not None:
+        range_clauses.append(DepFact.period_month >= date_from)
+    if date_to is not None:
+        range_clauses.append(DepFact.period_month <= date_to)
+
+    # Pass 1 — per-account aggregates ranked by 9L. We compute the
+    # full overall total here too so the UI's share % is correct
+    # even when the user views just the top-N accounts.
+    agg_stmt = (
+        select(
+            DepFact.account_id.label("account_id"),
+            DepAccount.name.label("name"),
+            DepAccount.address.label("address"),
+            DepAccount.state_code.label("state_code"),
+            DepAccount.city.label("city"),
+            DepAccount.county.label("county"),
+            DepAccount.zip_code.label("zip_code"),
+            DepAccount.distributor_code.label("distributor_code"),
+            func.coalesce(func.sum(DepFact.cases_9l), 0).label("cases_9l"),
+            func.coalesce(func.sum(DepFact.cases_physical), 0).label("cases_physical"),
+            func.count(distinct(DepFact.product_id)).label("product_count"),
+            func.min(case((DepFact.cases_9l != 0, DepFact.period_month))).label("first_active"),
+            func.max(case((DepFact.cases_9l != 0, DepFact.period_month))).label("last_active"),
+            func.count(distinct(case((DepFact.cases_9l != 0, DepFact.period_month)))).label(
+                "active_month_count"
+            ),
+        )
+        .select_from(DepFact)
+        .join(DepAccount, DepAccount.id == DepFact.account_id)
+        .group_by(
+            DepFact.account_id,
+            DepAccount.name,
+            DepAccount.address,
+            DepAccount.state_code,
+            DepAccount.city,
+            DepAccount.county,
+            DepAccount.zip_code,
+            DepAccount.distributor_code,
+        )
+        .order_by(func.sum(DepFact.cases_9l).desc())
+    )
+    for clause in range_clauses:
+        agg_stmt = agg_stmt.where(clause)
+    all_agg_rows = (await session.execute(agg_stmt)).all()
+    # ``total_9l`` is over all accounts (not just the limited top-N)
+    # so share denominators reflect the whole portfolio.
+    total_9l: Decimal = sum((row.cases_9l for row in all_agg_rows), Decimal("0"))
+    agg_rows = all_agg_rows[:limit]
+    top_account_ids = [r.account_id for r in agg_rows]
+
+    # Pass 2 — top 3 PRODUCTS per top-N account.
+    if top_account_ids:
+        prod_subq = (
+            select(
+                DepFact.account_id.label("account_id"),
+                DepFact.product_id.label("product_id"),
+                DepProduct.full_name.label("product_name"),
+                func.coalesce(func.sum(DepFact.cases_9l), 0).label("prod_9l"),
+            )
+            .select_from(DepFact)
+            .join(DepProduct, DepProduct.id == DepFact.product_id)
+            .where(DepFact.account_id.in_(top_account_ids))
+            .group_by(DepFact.account_id, DepFact.product_id, DepProduct.full_name)
+        )
+        for clause in range_clauses:
+            prod_subq = prod_subq.where(clause)
+        prod_subq_cte = prod_subq.subquery()
+        prod_rank = (
+            select(
+                prod_subq_cte.c.account_id,
+                prod_subq_cte.c.product_id,
+                prod_subq_cte.c.product_name,
+                prod_subq_cte.c.prod_9l,
+                func.row_number()
+                .over(
+                    partition_by=prod_subq_cte.c.account_id,
+                    order_by=prod_subq_cte.c.prod_9l.desc().nulls_last(),
+                )
+                .label("rn"),
+            )
+            .select_from(prod_subq_cte)
+            .subquery()
+        )
+        top_prod_rows = (
+            await session.execute(
+                select(
+                    prod_rank.c.account_id,
+                    prod_rank.c.product_id,
+                    prod_rank.c.product_name,
+                    prod_rank.c.prod_9l,
+                ).where(prod_rank.c.rn <= 3)
+            )
+        ).all()
+    else:
+        top_prod_rows = []
+    top_products_by_account: dict[int, list[dict[str, Any]]] = {}
+    for r in top_prod_rows:
+        top_products_by_account.setdefault(r.account_id, []).append(
+            {
+                "product_id": r.product_id,
+                "product_name": r.product_name,
+                "cases_9l": r.prod_9l,
+            }
+        )
+
+    # Pass 3 — 24-month per-account monthly series for the top-N.
+    series_by_account: dict[int, dict[date, Decimal]] = {}
+    if top_account_ids:
+        series_stmt = (
+            select(
+                DepFact.account_id.label("account_id"),
+                DepFact.period_month.label("period_month"),
+                func.coalesce(func.sum(DepFact.cases_9l), 0).label("cases_9l"),
+            )
+            .select_from(DepFact)
+            .where(DepFact.account_id.in_(top_account_ids))
+            .where(DepFact.period_month >= earliest_month)
+            .where(DepFact.period_month <= ref_month_start)
+            .group_by(DepFact.account_id, DepFact.period_month)
+        )
+        for srow in (await session.execute(series_stmt)).all():
+            series_by_account.setdefault(srow.account_id, {})[srow.period_month] = srow.cases_9l
+
+    # Assemble per-account records.
+    items: list[dict[str, Any]] = []
+    for row in agg_rows:
+        series_dict = series_by_account.get(row.account_id, {})
+        series_values_24: list[Decimal] = [series_dict.get(m, Decimal("0")) for m in month_axis_24]
+        series_values: list[Decimal] = series_values_24[-12:]
+        recent_3m = sum(series_values[-3:], Decimal("0"))
+        prior_3m = sum(series_values[-6:-3], Decimal("0"))
+        velocity_pct: float | None = None
+        if prior_3m > 0:
+            velocity_pct = float((recent_3m - prior_3m) / prior_3m * 100)
+        recent_12m = sum(series_values_24[-12:], Decimal("0"))
+        prior_12m = sum(series_values_24[:12], Decimal("0"))
+        yoy_pct: float | None = None
+        if prior_12m > 0:
+            yoy_pct = float((recent_12m - prior_12m) / prior_12m * 100)
+
+        cases_9l: Decimal = row.cases_9l
+        share = float(cases_9l / total_9l) if total_9l > 0 else 0.0
+        active_months: int = row.active_month_count or 0
+        avg_per_active_month = cases_9l / active_months if active_months > 0 else Decimal("0")
+
+        # Top products
+        raw_products = top_products_by_account.get(row.account_id, [])
+        top_products: list[dict[str, Any]] = [
+            {
+                "product_id": p["product_id"],
+                "product_name": p["product_name"],
+                "cases_9l": p["cases_9l"],
+                "share": (
+                    float(cast(Decimal, p["cases_9l"]) / cases_9l)
+                    if cases_9l > 0 and p["cases_9l"] > 0
+                    else 0.0
+                ),
+            }
+            for p in raw_products
+        ]
+        if top_products:
+            top_prod_id = top_products[0]["product_id"]
+            top_prod_name = top_products[0]["product_name"]
+            top_prod_share = top_products[0]["share"]
+        else:
+            top_prod_id = None
+            top_prod_name = None
+            top_prod_share = 0.0
+
+        months_active_12m = sum(1 for v in series_values if v > 0)
+
+        peak_month: date | None = None
+        peak_month_9l = Decimal("0")
+        for m_date, v in zip(month_axis, series_values, strict=True):
+            if v > peak_month_9l:
+                peak_month_9l = v
+                peak_month = m_date
+
+        days_since: int | None = (
+            (ref - row.last_active).days if row.last_active is not None else None
+        )
+
+        items.append(
+            {
+                "account_id": row.account_id,
+                "name": row.name,
+                "address": row.address,
+                "state_code": row.state_code,
+                "city": row.city,
+                "county": row.county,
+                "zip_code": row.zip_code,
+                "distributor_code": row.distributor_code,
+                "cases_9l": cases_9l,
+                "cases_physical": row.cases_physical,
+                "pct_of_9l": share,
+                "product_count": row.product_count,
+                "avg_9l_per_active_month": avg_per_active_month,
+                "top_product_id": top_prod_id,
+                "top_product_name": top_prod_name,
+                "top_product_share": top_prod_share,
+                "top_products": top_products,
+                "recent_3m_9l": recent_3m,
+                "prior_3m_9l": prior_3m,
+                "velocity_pct": velocity_pct,
+                "momentum": _classify_account_momentum(velocity_pct),
+                "recent_12m_9l": recent_12m,
+                "prior_12m_9l": prior_12m,
+                "yoy_pct": yoy_pct,
+                "first_active": row.first_active,
+                "last_active": row.last_active,
+                "months_active_12m": months_active_12m,
+                "peak_month": peak_month,
+                "peak_month_9l": peak_month_9l,
+                "days_since": days_since,
+                "monthly_series": [
+                    {"period": m, "cases_9l": v}
+                    for m, v in zip(month_axis, series_values, strict=True)
+                ],
+            }
+        )
+
+    # Top-10 concentration — share of the top-10 accounts out of the
+    # full portfolio total. UI flags > 0.5 as narrow customer base.
+    top_10_share = 0.0
+    if total_9l > 0:
+        top_10_sum: Decimal = sum(
+            (cast(Decimal, item["cases_9l"]) for item in items[:10]), Decimal("0")
+        )
+        top_10_share = float(top_10_sum / total_9l)
+
+    return {
+        "reference_date": ref,
+        "accounts": items,
+        "total_9l": total_9l,
+        "top_10_share": top_10_share,
+    }
