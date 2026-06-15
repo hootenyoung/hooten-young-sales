@@ -301,6 +301,8 @@ class GrowthDeclineAccount(BaseModel):
     state_code: str | None
     city: str | None
     distributor_name: str | None
+    # Broker's premises classification: 'ON' / 'OFF' / 'NA' / None.
+    premises_type: str | None
     recent_9l: Decimal
     prior_9l: Decimal
     diff_9l: Decimal
@@ -564,6 +566,22 @@ class StateTopDistributor(BaseModel):
     account_count: int
 
 
+class PremisesCounts(BaseModel):
+    """Account counts by premises classification within a state.
+
+    `unknown` covers accounts whose `premises_type` is NULL in the
+    DB (older accounts that predate the broker carrying the column).
+    Distinct from `na`, which is an active broker classification.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    on: int
+    off: int
+    na: int
+    unknown: int
+
+
 class StatePerformanceItem(BaseModel):
     """A single state's strategic depletion summary.
 
@@ -624,6 +642,13 @@ class StatePerformanceItem(BaseModel):
     accounts_active_90d: int
     accounts_gained_90d: int
     accounts_churned_90d: int
+
+    # Premises channel mix — number of accounts in this state by the
+    # broker's ON/OFF/NA classification. ``unknown`` covers accounts
+    # whose premises_type is still NULL in the DB. Sums to
+    # ``account_count`` above. See [[hy-premises-semantics]] for the
+    # four-state distinction.
+    premises_counts: PremisesCounts
 
     # Lifecycle
     first_active: date | None

@@ -405,6 +405,7 @@ async def get_top_accounts(
             DepAccount.state_code.label("state_code"),
             DepAccount.city.label("city"),
             DepAccount.distributor_code.label("distributor_code"),
+            DepAccount.premises_type.label("premises_type"),
             func.coalesce(func.sum(DepFact.cases_9l), 0).label("cases_9l"),
             func.coalesce(func.sum(DepFact.cases_physical), 0).label("cases_physical"),
             func.count(distinct(DepFact.product_id)).label("product_count"),
@@ -418,6 +419,7 @@ async def get_top_accounts(
             DepAccount.state_code,
             DepAccount.city,
             DepAccount.distributor_code,
+            DepAccount.premises_type,
         )
         .order_by(func.sum(DepFact.cases_9l).desc())
         .limit(limit)
@@ -432,6 +434,7 @@ async def get_top_accounts(
             "state_code": row.state_code,
             "city": row.city,
             "distributor_code": row.distributor_code,
+            "premises_type": row.premises_type,
             "cases_9l": row.cases_9l,
             "cases_physical": row.cases_physical,
             "product_count": row.product_count,

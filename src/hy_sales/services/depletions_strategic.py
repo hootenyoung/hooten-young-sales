@@ -280,6 +280,7 @@ async def get_new_vs_lost_accounts(
                 DepAccount.state_code.label("state_code"),
                 DepAccount.city.label("city"),
                 DepAccount.distributor_code.label("distributor_code"),
+                DepAccount.premises_type.label("premises_type"),
                 func.coalesce(func.sum(DepFact.cases_9l), 0).label("cases_9l"),
             )
             .select_from(DepAccount)
@@ -297,6 +298,7 @@ async def get_new_vs_lost_accounts(
                 DepAccount.state_code,
                 DepAccount.city,
                 DepAccount.distributor_code,
+                DepAccount.premises_type,
             )
         )
 
@@ -376,6 +378,7 @@ async def get_growth_decline(
                 DepAccount.state_code.label("state_code"),
                 DepAccount.city.label("city"),
                 DepAccount.distributor_code.label("distributor_code"),
+                DepAccount.premises_type.label("premises_type"),
                 func.coalesce(func.sum(DepFact.cases_9l), 0).label("cases_9l"),
             )
             .select_from(DepAccount)
@@ -393,6 +396,7 @@ async def get_growth_decline(
                 DepAccount.state_code,
                 DepAccount.city,
                 DepAccount.distributor_code,
+                DepAccount.premises_type,
             )
         )
 
@@ -429,6 +433,7 @@ async def get_growth_decline(
             "state_code": rrow.state_code,
             "city": rrow.city,
             "distributor_name": rrow.distributor_code,
+            "premises_type": rrow.premises_type,
             "recent_9l": recent_vol,
             "prior_9l": prior_vol,
             "diff_9l": diff,
@@ -1462,6 +1467,28 @@ async def get_state_performance(
             }
         )
 
+    # Premises channel mix per state — count of accounts by the
+    # broker's ON/OFF/NA classification. NULL premises_type rolls up
+    # as 'unknown' in the response. This is over the full portfolio
+    # (not range-filtered) so the mix reflects current account-base
+    # shape, not which channels happened to ship in the window.
+    premises_stmt = (
+        select(
+            DepAccount.state_code.label("state_code"),
+            DepAccount.premises_type.label("premises_type"),
+            func.count(DepAccount.id).label("account_count"),
+        )
+        .where(DepAccount.state_code.is_not(None))
+        .group_by(DepAccount.state_code, DepAccount.premises_type)
+    )
+    premises_counts_by_state: dict[str, dict[str, int]] = {}
+    for prow in (await session.execute(premises_stmt)).all():
+        sc = prow.state_code
+        key = (prow.premises_type or "unknown").lower()
+        bucket = premises_counts_by_state.setdefault(sc, {"on": 0, "off": 0, "na": 0, "unknown": 0})
+        if key in bucket:
+            bucket[key] = int(prow.account_count)
+
     # Assemble.
     items: list[dict[str, Any]] = []
     total_9l: Decimal = sum((row.cases_9l for row in agg_rows), Decimal("0"))
@@ -1602,6 +1629,9 @@ async def get_state_performance(
                 "accounts_active_90d": momentum_counts["active_90d"],
                 "accounts_gained_90d": momentum_counts["gained_90d"],
                 "accounts_churned_90d": momentum_counts["churned_90d"],
+                "premises_counts": premises_counts_by_state.get(
+                    state_code, {"on": 0, "off": 0, "na": 0, "unknown": 0}
+                ),
                 "first_active": row.first_active,
                 "last_active": row.last_active,
                 "months_active_12m": months_active_12m,

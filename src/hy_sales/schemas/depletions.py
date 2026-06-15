@@ -92,6 +92,9 @@ class TopAccount(BaseModel):
     state_code: str | None
     city: str | None
     distributor_name: str | None
+    # Broker's premises classification: 'ON' / 'OFF' / 'NA' / None.
+    # See FollowUpAccount.premises_type for full semantics.
+    premises_type: str | None
     cases_9l: Decimal
     cases_physical: Decimal
     product_count: int

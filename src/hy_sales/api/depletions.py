@@ -173,6 +173,7 @@ async def top_accounts(
             # ``distributor_name`` for API stability — we pass the code
             # through it. See depletions_strategic.py header for context.
             distributor_name=r["distributor_code"],
+            premises_type=r["premises_type"],
             cases_9l=r["cases_9l"],
             cases_physical=r["cases_physical"],
             product_count=r["product_count"],
