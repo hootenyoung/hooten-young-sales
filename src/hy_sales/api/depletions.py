@@ -301,7 +301,7 @@ async def account_performance(
             ge=1,
             le=5000,
             description=(
-                "Number of top accounts to return. " "Set high to load all and let the UI paginate."
+                "Number of top accounts to return. Set high to load all and let the UI paginate."
             ),
         ),
     ] = 50,

@@ -220,9 +220,9 @@ async def _bulk_resolve_products(
     if new_products:
         inserted_rows = (
             await session.execute(
-                pg_insert(DepProduct).values(new_products).returning(
-                    DepProduct.id, DepProduct.full_name
-                )
+                pg_insert(DepProduct)
+                .values(new_products)
+                .returning(DepProduct.id, DepProduct.full_name)
             )
         ).all()
         for row in inserted_rows:
