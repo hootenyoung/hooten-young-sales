@@ -87,10 +87,12 @@ def test_depletions_parser_monthly() -> None:
     for row in rows:
         # All period_month values must be first-of-month.
         assert row.period_month.day == 1, f"period_month {row.period_month} not first-of-month"
-        # Each emitted row should be non-zero (we filter (0, 0) out at parse time),
-        # but values can be negative (returns / pullbacks from retail).
-        is_zero = row.cases_9l == 0 and (row.cases_physical is None or row.cases_physical == 0)
-        assert not is_zero, "parser should drop (0, 0) rows"
+    # Parser preserves zero cells — an explicit zero from iDIG records
+    # "no depletions this month" and is distinct from "no data". Confirm
+    # at least one (0, 0) row survives unpivoting.
+    assert any(
+        r.cases_9l == 0 and (r.cases_physical is None or r.cases_physical == 0) for r in rows
+    ), "parser should preserve (0, 0) rows"
     # New monthly format includes Physical Cases — at least some rows should have it.
     assert any(r.cases_physical is not None and r.cases_physical != 0 for r in rows)
     # Returns / negative values DO occur — confirm the parser doesn't drop them.

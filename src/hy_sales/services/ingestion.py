@@ -1,24 +1,21 @@
-"""Ingestion orchestration — turn parsed canonical objects into DB rows.
+"""Ingestion orchestration for the sales (QuickBooks invoices) domain.
+
+The depletions side lives in ``services.depletions_ingestion`` — fully
+isolated by schema (``sales`` vs ``depletions``), with no shared
+helpers. Each domain owns its own resolution, upload ledger, and
+idempotency machinery.
 
 Idempotency:
-  * SHA-256 dedup on ``file_uploads`` — re-running on the same file is a
-    no-op (returns the prior upload with ``status='skipped_duplicate'``).
+  * SHA-256 dedup on ``sales.file_uploads`` — re-running on the same
+    file is a no-op (returns the prior upload with
+    ``status='skipped_duplicate'``).
   * Sales: upsert ``invoices`` by ``(source_system, invoice_ref)``;
     DELETE + INSERT lines under that invoice.
-  * Depletions: Postgres ``INSERT ... ON CONFLICT DO UPDATE`` against the
-    natural-key index ``(account_id, product_id, period_month)``.
 
 Per-run caches:
-  Many depletion rows reference the same product, account, and
+  Many invoice lines reference the same product, customer, and
   distributor. ``_Caches`` keeps these resolutions in memory for the
-  duration of one ingestion call so we don't hit the DB once per row.
-
-Alias resolution:
-  Raw product / customer strings from the source files are auto-resolved
-  via ``product_aliases`` / ``customer_aliases``. If no alias matches,
-  the helper creates a Product (or Customer) using the raw string as the
-  canonical name, plus an alias row pointing at it. An admin can later
-  merge duplicates in DataGrip (or via an admin endpoint when we add one).
+  duration of one ingestion call so we don't hit the DB once per line.
 """
 
 from __future__ import annotations
@@ -32,14 +29,11 @@ from typing import TypedDict
 
 import structlog
 from sqlalchemy import delete, func, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from hy_sales.models import (
-    Account,
     Customer,
     CustomerAlias,
-    Depletion,
     Distributor,
     FileUpload,
     Invoice,
@@ -47,24 +41,20 @@ from hy_sales.models import (
     Product,
     ProductAlias,
 )
-from hy_sales.parsers.canonical import ParsedDepletionRow, ParsedSalesInvoice
-from hy_sales.parsers.depletions import parse_depletions_xlsx
+from hy_sales.parsers.canonical import ParsedSalesInvoice
 from hy_sales.parsers.sales import parse_sales_xlsx
 from hy_sales.services.customer_parser import parse_customer_name
 
 logger = structlog.get_logger(__name__)
 
 
-# Callback signature: ``on_progress(done, total)`` — called periodically
-# by the row loops so the CLI can emit user-facing progress lines.
 ProgressCallback = Callable[[int, int], None]
 
-# How often the row loops call the progress callback.
 _PROGRESS_EVERY = 100
 
 
 class UploadSummary(TypedDict):
-    """Return value from ``ingest_*_file``."""
+    """Return value from ``ingest_sales_file``."""
 
     id: int
     filename: str
@@ -80,22 +70,19 @@ class UploadSummary(TypedDict):
 
 @dataclass
 class _Caches:
-    """In-memory caches scoped to a single ingestion run.
+    """In-memory caches scoped to a single sales-ingestion run.
 
-    Cuts DB round-trips significantly when many rows reference the same
-    product / account / distributor (the common case for depletions —
-    ~20 unique products and ~1k unique accounts can produce ~10k rows).
+    Cuts DB round-trips when many invoice lines reference the same
+    product / customer / distributor.
     """
 
     product: dict[str, int] = field(default_factory=dict)
     customer: dict[str, int] = field(default_factory=dict)
-    # account key: (name, address, state_code) — matches the natural-key UNIQUE.
-    account: dict[tuple[str, str | None, str | None], int] = field(default_factory=dict)
     distributor: dict[str, int] = field(default_factory=dict)
 
 
 # ----------------------------------------------------------------
-# Public entry points
+# Public entry point
 # ----------------------------------------------------------------
 
 
@@ -159,69 +146,8 @@ async def ingest_sales_file(
     return _summary(upload)
 
 
-async def ingest_depletions_file(
-    session: AsyncSession,
-    path: Path,
-    source_system: str = "broker_monthly",
-    on_progress: ProgressCallback | None = None,
-) -> UploadSummary:
-    """Parse + ingest a depletions xlsx file (auto-detects monthly vs MVP layout)."""
-    upload, is_new = await _get_or_create_upload(
-        session, path, kind="depletions", source_system=source_system
-    )
-    if not is_new:
-        logger.info("upload.skip.duplicate", path=str(path), sha=upload.sha256)
-        return _summary(upload, status="skipped_duplicate")
-
-    rows = parse_depletions_xlsx(path)
-    caches = _Caches()
-
-    total = len(rows)
-    ingested = 0
-    failed = 0
-
-    for i, parsed in enumerate(rows, start=1):
-        try:
-            await _upsert_depletion(session, parsed, upload, caches)
-            ingested += 1
-        except Exception as exc:  # per-row failure must not abort the batch
-            failed += 1
-            logger.error(
-                "depletion.ingest.fail",
-                account=parsed.account_name,
-                product=parsed.product_raw_text,
-                period=str(parsed.period_month),
-                error=str(exc),
-            )
-
-        if on_progress is not None and (i % _PROGRESS_EVERY == 0 or i == total):
-            on_progress(i, total)
-
-    if rows:
-        dates = [r.period_month for r in rows]
-        upload.period_start = min(dates)
-        upload.period_end = max(dates)
-
-    # The upsert path doesn't cheaply distinguish insert vs update — we
-    # report the total as "inserted" for the first run (the common case)
-    # and treat any re-ingestion's overlaps as effectively replaced.
-    _apply_counters(
-        upload,
-        processed=total,
-        inserted=ingested,
-        updated=0,
-        skipped=0,
-        failed=failed,
-    )
-    upload.status = "success" if failed == 0 else "partial"
-    upload.processed_at = datetime.now()
-    await session.flush()
-
-    return _summary(upload)
-
-
 # ----------------------------------------------------------------
-# Sales-side upserts
+# Invoice upsert
 # ----------------------------------------------------------------
 
 
@@ -242,6 +168,7 @@ async def _upsert_invoice(
         parsed.customer_raw_text,
         source_system,
         cache=caches.customer,
+        distributor_cache=caches.distributor,
     )
 
     existing = await session.scalar(
@@ -281,7 +208,6 @@ async def _upsert_invoice(
         product_id = await _resolve_product(
             session,
             line.product_raw_text,
-            source="sales",
             cache=caches.product,
         )
         session.add(
@@ -301,59 +227,6 @@ async def _upsert_invoice(
 
 
 # ----------------------------------------------------------------
-# Depletions-side upserts (PG ON CONFLICT)
-# ----------------------------------------------------------------
-
-
-async def _upsert_depletion(
-    session: AsyncSession,
-    parsed: ParsedDepletionRow,
-    upload: FileUpload,
-    caches: _Caches,
-) -> None:
-    """Upsert one depletion row via PostgreSQL ``INSERT ... ON CONFLICT DO UPDATE``.
-
-    One round-trip per row (vs SELECT + INSERT/UPDATE = two). Combined
-    with the alias caches in ``_Caches``, this is the hot path.
-    """
-    product_id = await _resolve_product(
-        session,
-        parsed.product_raw_text,
-        source="depletions",
-        cache=caches.product,
-    )
-    account_id = await _resolve_account_id(
-        session,
-        name=parsed.account_name,
-        address=parsed.account_address,
-        city=parsed.account_city,
-        state_code=parsed.state_code,
-        distributor_code=parsed.distributor_code,
-        account_cache=caches.account,
-        distributor_cache=caches.distributor,
-    )
-
-    stmt = pg_insert(Depletion).values(
-        account_id=account_id,
-        product_id=product_id,
-        period_month=parsed.period_month,
-        cases_9l=parsed.cases_9l,
-        cases_physical=parsed.cases_physical,
-        file_upload_id=upload.id,
-    )
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["account_id", "product_id", "period_month"],
-        set_={
-            "cases_9l": stmt.excluded.cases_9l,
-            "cases_physical": stmt.excluded.cases_physical,
-            "file_upload_id": stmt.excluded.file_upload_id,
-            "updated_at": func.now(),
-        },
-    )
-    await session.execute(stmt)
-
-
-# ----------------------------------------------------------------
 # Alias / dimension resolution (cache-aware)
 # ----------------------------------------------------------------
 
@@ -361,10 +234,9 @@ async def _upsert_depletion(
 async def _resolve_product(
     session: AsyncSession,
     raw_text: str,
-    source: str,
     cache: dict[str, int],
 ) -> int:
-    """Return product.id for ``raw_text``. Auto-create product + alias if missing."""
+    """Return Product.id for ``raw_text``. Auto-create product + alias if missing."""
     if raw_text in cache:
         return cache[raw_text]
 
@@ -387,7 +259,7 @@ async def _resolve_product(
         ProductAlias(
             alias_text=raw_text,
             product_id=product.id,
-            source=source,
+            source="sales",
         )
     )
     await session.flush()
@@ -400,6 +272,7 @@ async def _resolve_customer(
     raw_text: str,
     source_system: str,
     cache: dict[str, int],
+    distributor_cache: dict[str, int],
 ) -> int | None:
     """Return customer.id for ``raw_text``, or None if raw is empty.
 
@@ -430,6 +303,7 @@ async def _resolve_customer(
                 session,
                 name=parsed.distributor_name,
                 channel=parsed.channel,
+                cache=distributor_cache,
             )
         customer = Customer(
             canonical_name=normalized,
@@ -456,96 +330,30 @@ async def _resolve_distributor_id_with_channel(
     *,
     name: str,
     channel: str,
+    cache: dict[str, int],
 ) -> int:
     """Get or create a distributor by name, preferring the parsed channel.
 
     If the row already exists with the default ``'distributor'`` channel
     but we now know better (e.g. ``'control_state'``), upgrade it.
     """
-    distributor = await session.scalar(select(Distributor).where(Distributor.name == name))
-    if distributor is None:
-        distributor = Distributor(name=name, channel=channel)
-        session.add(distributor)
-        await session.flush()
-        return distributor.id
-
-    # Upgrade channel if we now have better information.
-    if distributor.channel == "distributor" and channel in (
-        "control_state",
-        "military",
-    ):
-        distributor.channel = channel
-        await session.flush()
-    return distributor.id
-
-
-async def _resolve_account_id(
-    session: AsyncSession,
-    *,
-    name: str,
-    address: str | None,
-    city: str | None,
-    state_code: str | None,
-    distributor_code: str | None,
-    account_cache: dict[tuple[str, str | None, str | None], int],
-    distributor_cache: dict[str, int],
-) -> int:
-    """Return account.id by natural key. Auto-create account + distributor if missing."""
-    key = (name, address, state_code)
-    if key in account_cache:
-        return account_cache[key]
-
-    stmt = select(Account.id).where(Account.name == name)
-    stmt = stmt.where(Account.address.is_(None) if address is None else Account.address == address)
-    stmt = stmt.where(
-        Account.state_code.is_(None) if state_code is None else Account.state_code == state_code
-    )
-    account_id = await session.scalar(stmt)
-
-    if account_id is not None:
-        account_cache[key] = account_id
-        return account_id
-
-    distributor_id: int | None = None
-    if distributor_code:
-        distributor_id = await _resolve_distributor_id(
-            session, distributor_code, cache=distributor_cache
-        )
-
-    account = Account(
-        name=name,
-        address=address,
-        city=city,
-        state_code=state_code,
-        distributor_id=distributor_id,
-        distributor_code=distributor_code,
-    )
-    session.add(account)
-    await session.flush()
-    account_cache[key] = account.id
-    return account.id
-
-
-async def _resolve_distributor_id(
-    session: AsyncSession,
-    name: str,
-    cache: dict[str, int],
-) -> int:
-    """Return distributor.id by canonical name. Auto-create if missing."""
     if name in cache:
         return cache[name]
 
     distributor = await session.scalar(select(Distributor).where(Distributor.name == name))
     if distributor is None:
-        distributor = Distributor(name=name)
+        distributor = Distributor(name=name, channel=channel)
         session.add(distributor)
+        await session.flush()
+    elif distributor.channel == "distributor" and channel in ("control_state", "military"):
+        distributor.channel = channel
         await session.flush()
     cache[name] = distributor.id
     return distributor.id
 
 
 # ----------------------------------------------------------------
-# file_uploads helpers
+# Upload ledger helpers
 # ----------------------------------------------------------------
 
 
@@ -564,7 +372,6 @@ async def _get_or_create_upload(
         return existing, False
 
     if existing is not None:
-        # Retry a previously failed / partial upload — reset counters.
         existing.status = "processing"
         existing.error_message = None
         existing.row_count_processed = 0
@@ -593,11 +400,6 @@ def _sha256_of(path: Path) -> str:
         for chunk in iter(lambda: fh.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
-
-
-# ----------------------------------------------------------------
-# Counter / summary helpers
-# ----------------------------------------------------------------
 
 
 def _apply_counters(

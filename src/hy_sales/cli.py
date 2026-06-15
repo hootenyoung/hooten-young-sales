@@ -22,9 +22,12 @@ from pathlib import Path
 import structlog
 
 from hy_sales.db.engine import async_session_factory
+from hy_sales.services.depletions_ingestion import (
+    DepUploadSummary,
+    ingest_depletions_file,
+)
 from hy_sales.services.ingestion import (
     UploadSummary,
-    ingest_depletions_file,
     ingest_sales_file,
 )
 
@@ -43,12 +46,11 @@ async def _run(kind: str, path: Path) -> int:
 
     print(f"Parsing {path.name}...", file=sys.stderr, flush=True)
 
+    summary: UploadSummary | DepUploadSummary
     async with async_session_factory() as session:
         try:
             if kind == "sales":
-                summary: UploadSummary = await ingest_sales_file(
-                    session, path, on_progress=_progress
-                )
+                summary = await ingest_sales_file(session, path, on_progress=_progress)
             else:  # kind == "depletions"
                 summary = await ingest_depletions_file(session, path, on_progress=_progress)
             await session.commit()

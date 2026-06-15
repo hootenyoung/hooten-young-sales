@@ -43,14 +43,22 @@ class ParsedSalesInvoice(BaseModel):
 
 
 class ParsedDepletionRow(BaseModel):
-    """One (account, product, month) depletion fact."""
+    """One (account, product, month) depletion fact.
+
+    ``state_code`` is the account's physical state. ``dist_state_code``
+    is the servicing distributor's state — usually the same, but can
+    differ (a distributor in one state servicing accounts in another).
+    """
 
     model_config = ConfigDict(frozen=True)
 
     state_code: str | None
+    dist_state_code: str | None = None
     account_name: str
     account_address: str | None
     account_city: str | None
+    account_county: str | None = None
+    account_zip: str | None = None
     distributor_code: str | None
     product_raw_text: str
     period_month: date

@@ -10,34 +10,39 @@ def test_package_imports() -> None:
     assert hy_sales.__version__
 
 
-def test_models_register_under_sales_schema() -> None:
-    """Every ORM table registers under the 'sales' Postgres schema."""
+def test_models_register_under_known_schemas() -> None:
+    """Every ORM table registers under the 'sales' or 'depletions' schema."""
     from hy_sales.models import Base
 
     assert Base.metadata.tables, "no models registered"
     for table in Base.metadata.tables.values():
-        assert table.schema == "sales", (
-            f"Table {table.name!r} is not in 'sales' schema (got {table.schema!r})"
+        assert table.schema in {"sales", "depletions"}, (
+            f"Table {table.schema}.{table.name!r} is not in an allowed schema"
         )
 
 
 def test_models_match_expected_tables() -> None:
-    """The 10 sales tables we expect are registered."""
+    """The full set of fully-qualified tables we expect is registered."""
     from hy_sales.models import Base
 
-    table_names = {t.name for t in Base.metadata.tables.values()}
+    table_names = {f"{t.schema}.{t.name}" for t in Base.metadata.tables.values()}
     expected = {
-        "app_config",
-        "file_uploads",
-        "products",
-        "product_aliases",
-        "distributors",
-        "customers",
-        "customer_aliases",
-        "accounts",
-        "invoices",
-        "invoice_lines",
-        "depletions",
+        # Sales schema — QuickBooks-feed wholesale sales
+        "sales.app_config",
+        "sales.file_uploads",
+        "sales.products",
+        "sales.product_aliases",
+        "sales.distributors",
+        "sales.customers",
+        "sales.customer_aliases",
+        "sales.invoices",
+        "sales.invoice_lines",
+        # Depletions schema — iDIG-feed retail pull-through
+        "depletions.file_uploads",
+        "depletions.products",
+        "depletions.product_aliases",
+        "depletions.accounts",
+        "depletions.facts",
     }
     assert table_names == expected, (
         f"Unexpected tables. Missing: {expected - table_names}, Extra: {table_names - expected}"
@@ -65,6 +70,8 @@ def test_app_factory_returns_fastapi() -> None:
     assert "/api/depletions/follow-ups" in paths
     assert "/api/depletions/new-vs-lost" in paths
     assert "/api/depletions/velocity" in paths
+    assert "/api/depletions/growth-decline" in paths
+    assert "/api/depletions/account-monthly-grid" in paths
     assert "/api/sales/white-space" in paths
     assert "/api/sales/order-analysis" in paths
     assert "/api/sales/risk" in paths

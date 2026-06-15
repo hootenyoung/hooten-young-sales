@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from hy_sales.db.session import get_session
 from hy_sales.schemas.depletions import (
+    AccountMonthlyGridResponse,
     DepletionsKPIs,
     DepletionsProductPerformance,
     DepletionsProductResponse,
@@ -21,19 +22,24 @@ from hy_sales.schemas.depletions import (
 )
 from hy_sales.schemas.strategic import (
     FollowUpTrackerResponse,
+    GrowthDeclineResponse,
     NewVsLostAccountsResponse,
+    ProductPerformanceResponse,
     VelocityAnalysisResponse,
 )
 from hy_sales.services.depletions_queries import (
+    get_account_monthly_grid,
     get_depletions_by_product,
     get_depletions_by_state,
     get_depletions_kpis,
     get_depletions_monthly_trend,
     get_top_accounts,
 )
-from hy_sales.services.strategic_queries import (
+from hy_sales.services.depletions_strategic import (
     get_follow_up_tracker,
+    get_growth_decline,
     get_new_vs_lost_accounts,
+    get_product_performance,
     get_velocity_analysis,
 )
 
@@ -156,7 +162,11 @@ async def top_accounts(
             name=r["name"],
             state_code=r["state_code"],
             city=r["city"],
-            distributor_name=r["distributor_name"],
+            # The depletions feed carries only a raw distributor short
+            # code (e.g. "FL13"). The schema field is named
+            # ``distributor_name`` for API stability — we pass the code
+            # through it. See depletions_strategic.py header for context.
+            distributor_name=r["distributor_code"],
             cases_9l=r["cases_9l"],
             cases_physical=r["cases_physical"],
             product_count=r["product_count"],
@@ -206,3 +216,51 @@ async def velocity(
 ) -> VelocityAnalysisResponse:
     data = await get_velocity_analysis(session)
     return VelocityAnalysisResponse.model_validate(data)
+
+
+@router.get(
+    "/account-monthly-grid",
+    response_model=AccountMonthlyGridResponse,
+    summary="Top N accounts with their per-month volume series (powers the heatmap).",
+)
+async def account_monthly_grid(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    date_from: DateFromParam = None,
+    date_to: DateToParam = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> AccountMonthlyGridResponse:
+    data = await get_account_monthly_grid(
+        session, date_from=date_from, date_to=date_to, limit=limit
+    )
+    return AccountMonthlyGridResponse.model_validate(data)
+
+
+@router.get(
+    "/growth-decline",
+    response_model=GrowthDeclineResponse,
+    summary="Returning accounts whose volume grew or shrank period-over-period.",
+)
+async def growth_decline(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    window_months: Annotated[
+        int,
+        Query(ge=1, le=24, description="Length in months of each comparison window."),
+    ] = 12,
+) -> GrowthDeclineResponse:
+    data = await get_growth_decline(session, window_months=window_months)
+    return GrowthDeclineResponse.model_validate(data)
+
+
+@router.get(
+    "/product-performance",
+    response_model=ProductPerformanceResponse,
+    summary="Strategic per-SKU view — volume, share, depth, top state/account, "
+    "momentum (recent 3M vs prior 3M), and a 12-month sparkline.",
+)
+async def product_performance(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    date_from: DateFromParam = None,
+    date_to: DateToParam = None,
+) -> ProductPerformanceResponse:
+    data = await get_product_performance(session, date_from=date_from, date_to=date_to)
+    return ProductPerformanceResponse.model_validate(data)

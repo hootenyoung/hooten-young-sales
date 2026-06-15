@@ -104,3 +104,40 @@ class TopAccountsResponse(BaseModel):
 
     accounts: list[TopAccount]
     total_9l: Decimal
+
+
+# ----------------------------------------------------------------
+# Account x Month heatmap
+# ----------------------------------------------------------------
+
+
+class AccountMonthlyVolume(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    period: date
+    cases_9l: Decimal
+
+
+class AccountMonthlyGridRow(BaseModel):
+    """One row of the heatmap: an account plus its full monthly volume series."""
+
+    model_config = ConfigDict(frozen=True)
+
+    account_id: int
+    name: str
+    state_code: str | None
+    city: str | None
+    distributor_code: str | None
+    total_9l: Decimal
+    months_active: int
+    frequency: str
+    monthly_volumes: list[AccountMonthlyVolume]
+
+
+class AccountMonthlyGridResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    period_start: date | None
+    period_end: date | None
+    months: list[date]
+    accounts: list[AccountMonthlyGridRow]

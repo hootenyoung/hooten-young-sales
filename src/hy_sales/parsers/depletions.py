@@ -1,22 +1,26 @@
 """Parser for the depletions xlsx file (state x account x product x month pivot).
 
-Supports two layouts that have appeared so far:
+Supports three layouts that have appeared so far, auto-detected by the
+position of the "Products" column in the dim header row:
 
-* **New monthly file** (e.g. ``HY Jan 2025 thru May 2026 State Acct Product.xlsx``)
-  with 8 dim columns (Dist States, Account Names, Address, City, State,
-  Distributor code, Acct City State, Products) and paired ``(9 Liter Equivs,
-  Physical Cases)`` columns per month.
+* **iDIG Rolling Periods** (current; 9 dim columns):
+  Dist States, Account Names, Address, City, State, Distributor code,
+  Acct Counties, Acct Zips, Products — followed by N single
+  ``9 Liter Equivs`` columns, one per month.
 
-* **Older MVP file** (e.g. ``Distribution-Jan2025thurApril2026.xlsx``) with 6 dim
-  columns (Dist States, Account Names, Address, City, Acct City State,
-  Products) and a single ``9 Liter Equivs`` column per month.
+* **Older broker monthly** (8 dim columns):
+  Dist States, Account Names, Address, City, State, Distributor code,
+  Acct City State, Products — followed by paired
+  ``(9 Liter Equivs, Physical Cases)`` columns per month.
 
-The parser auto-detects which layout is present by inspecting the header row,
-unpivots the monthly columns into long-format rows, and skips subtotal /
-grand-total rows.
+* **MVP file** (6 dim columns):
+  Dist States, Account Names, Address, City, Acct City State, Products —
+  single ``9 Liter Equivs`` column per month.
 
-Multi-month aggregate columns ("17 Months ...", "Diff", "Pct", etc.) are
-ignored.
+Multi-month aggregate columns ("30 Months ...", "Diff", "Pct", etc.)
+are ignored. Zero-valued cells ARE preserved — a stored zero records
+"iDIG reported no depletions for that account/product/month", which is
+distinct from "no data".
 """
 
 from __future__ import annotations
@@ -38,11 +42,14 @@ def parse_depletions_xlsx(path: Path) -> list[ParsedDepletionRow]:
     """Parse a depletions xlsx file into long-format rows.
 
     Each returned row represents one (account, product, month) datapoint
-    with cases_9l (and optionally cases_physical). Zero-valued rows
-    are dropped — we only return periods where the account had real
-    movement of that product.
+    with cases_9l (and optionally cases_physical for layouts that pair
+    the metrics). Zero-valued rows ARE returned — they record that the
+    source explicitly reported zero depletions, not absence of data.
     """
-    wb = load_workbook(path, data_only=True, read_only=True)
+    # NOTE: read_only=True would be faster, but iDIG exports declare a
+    # stale "A1" worksheet dimension that makes read-only iter_rows yield
+    # only the brand-title row. ~4k-row files don't need read-only mode.
+    wb = load_workbook(path, data_only=True)
     ws = wb.active
     if ws is None:
         return []
@@ -57,13 +64,7 @@ def parse_depletions_xlsx(path: Path) -> list[ParsedDepletionRow]:
     dim_count = _detect_dim_count(dim_header_row)
     is_paired = _is_paired_metric_layout(dim_header_row, dim_count)
     value_columns = _identify_value_columns(period_header_row, dim_count, is_paired)
-
-    # Find which column holds the address / city / distributor code based on layout.
-    col_address = 2
-    col_city = 3
-    # In the 8-dim "new" layout, the distributor code lives in col 5
-    # (after the redundant 'State' column at col 4).
-    col_distributor = 5 if dim_count == 8 else None
+    layout = _resolve_layout(dim_count, dim_header_row)
 
     results: list[ParsedDepletionRow] = []
 
@@ -78,10 +79,19 @@ def parse_depletions_xlsx(path: Path) -> list[ParsedDepletionRow]:
         if not account_name or not product_raw:
             continue
 
-        state_code = _normalize_state(row[0])
-        address = _to_str(row[col_address])
-        city = _to_str(row[col_city])
-        distributor_code = _to_str(row[col_distributor]) if col_distributor is not None else None
+        dist_state_code = _normalize_state(row[layout["dist_state"]])
+        state_code = (
+            _normalize_state(row[layout["state"]])
+            if layout["state"] is not None
+            else dist_state_code
+        )
+        address = _to_str(row[layout["address"]])
+        city = _to_str(row[layout["city"]])
+        distributor_code = (
+            _to_str(row[layout["distributor"]]) if layout["distributor"] is not None else None
+        )
+        county = _to_str(row[layout["county"]]) if layout["county"] is not None else None
+        zip_code = _to_str(row[layout["zip"]]) if layout["zip"] is not None else None
 
         for col_idx, period_month in value_columns:
             if col_idx >= len(row):
@@ -91,15 +101,15 @@ def parse_depletions_xlsx(path: Path) -> list[ParsedDepletionRow]:
             if is_paired and col_idx + 1 < len(row):
                 cases_physical = _to_decimal(row[col_idx + 1])
 
-            if cases_9l == 0 and (cases_physical is None or cases_physical == 0):
-                continue
-
             results.append(
                 ParsedDepletionRow(
                     state_code=state_code,
+                    dist_state_code=dist_state_code,
                     account_name=account_name,
                     account_address=address,
                     account_city=city,
+                    account_county=county,
+                    account_zip=zip_code,
                     distributor_code=distributor_code,
                     product_raw_text=product_raw,
                     period_month=period_month,
@@ -116,8 +126,8 @@ def _detect_dim_count(dim_header_row: tuple[Any, ...]) -> int:
     for i, cell in enumerate(dim_header_row):
         if cell is not None and str(cell).strip().lower() == "products":
             return i + 1
-    # Fall back to the new layout.
-    return 8
+    # Fall back to the iDIG 9-dim layout.
+    return 9
 
 
 def _is_paired_metric_layout(dim_header_row: tuple[Any, ...], dim_count: int) -> bool:
@@ -134,6 +144,49 @@ def _is_paired_metric_layout(dim_header_row: tuple[Any, ...], dim_count: int) ->
     )
 
 
+def _resolve_layout(dim_count: int, dim_header_row: tuple[Any, ...]) -> dict[str, int | None]:
+    """Map logical fields to column indices for the detected layout.
+
+    Returns 0-based column indices (or None when the field is absent
+    from this layout). ``dist_state`` is always col 0.
+    """
+    if dim_count == 9:
+        # iDIG Rolling Periods (current).
+        return {
+            "dist_state": 0,
+            "account_name": 1,
+            "address": 2,
+            "city": 3,
+            "state": 4,
+            "distributor": 5,
+            "county": 6,
+            "zip": 7,
+        }
+    if dim_count == 8:
+        # Older broker monthly layout with paired metrics.
+        return {
+            "dist_state": 0,
+            "account_name": 1,
+            "address": 2,
+            "city": 3,
+            "state": 4,
+            "distributor": 5,
+            "county": None,
+            "zip": None,
+        }
+    # 6-dim MVP layout — no separate State / Distributor / County / Zip.
+    return {
+        "dist_state": 0,
+        "account_name": 1,
+        "address": 2,
+        "city": 3,
+        "state": None,
+        "distributor": None,
+        "county": None,
+        "zip": None,
+    }
+
+
 def _identify_value_columns(
     period_header_row: tuple[Any, ...],
     dim_count: int,
@@ -142,7 +195,7 @@ def _identify_value_columns(
     """Return the list of monthly value-column starts as ``(col_idx, period_month)``.
 
     Stops at the first column whose header is not a 1-month period (e.g.
-    "17 Months ...", "Diff", "Pct"), so aggregate columns are ignored.
+    "30 Months ...", "Diff", "Pct"), so aggregate columns are ignored.
     """
     stride = 2 if is_paired else 1
     out: list[tuple[int, date]] = []

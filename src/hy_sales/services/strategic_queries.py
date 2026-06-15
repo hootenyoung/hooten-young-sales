@@ -1,32 +1,30 @@
-"""Strategic / analytical queries that combine raw aggregates with extra Python logic.
+"""Strategic / analytical queries for the sales (invoices) domain.
 
 Covers:
-  * White-Space Matrix — product x state grid + gap statistics.
+  * White-Space Matrix — product x state revenue grid + gap statistics
+    (sales-side only: invoices x products x customer states).
   * Order Analysis — invoice-level rollups (size buckets, cross-sell pairs,
     distributor frequency, monthly order trend).
   * Risk / Concentration — top-N share + Herfindahl-Hirschman Index across
     product, distributor, and state dimensions.
-  * Follow-Up Tracker — accounts bucketed by days since last depletion.
-  * New vs Lost Accounts — accounts gained / lost between two time windows.
 
-These call into the simpler aggregations but layer on derived metrics that
-don't compose cleanly as a single SQL query.
+The depletions-side strategic queries (Follow-Up Tracker, New vs Lost,
+Velocity) live in ``services.depletions_strategic`` — physically
+isolated, no shared helpers or models.
 """
 
 from __future__ import annotations
 
 from collections import Counter
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 from typing import Any, TypedDict, cast
 
-from sqlalchemy import Date, and_, distinct, func, select
+from sqlalchemy import Date, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from hy_sales.models import (
-    Account,
     Customer,
-    Depletion,
     Distributor,
     Invoice,
     InvoiceLine,
@@ -416,307 +414,4 @@ async def get_risk_dashboard(
         "product_concentration": _concentration(products),
         "distributor_concentration": _concentration(distributors),
         "state_concentration": _concentration(states),
-    }
-
-
-# ----------------------------------------------------------------
-# Follow-Up Tracker (depletions)
-# ----------------------------------------------------------------
-
-
-_FOLLOW_UP_BUCKETS = [
-    ("0-30 days", 0, 30),
-    ("30-60 days", 30, 60),
-    ("60-90 days", 60, 90),
-    ("90-120 days", 90, 120),
-    ("120+ days", 120, None),
-]
-
-
-async def get_follow_up_tracker(
-    session: AsyncSession,
-    *,
-    reference_date: date | None = None,
-) -> dict[str, Any]:
-    """Bucket accounts by days since their last recorded depletion.
-
-    ``reference_date`` defaults to the latest period_month in the data
-    (treated as "today" for the analysis). Each bucket reports a count
-    plus the accounts that fall in it.
-    """
-    latest_stmt = select(func.max(Depletion.period_month))
-    latest: date | None = await session.scalar(latest_stmt)
-    ref: date = reference_date or latest or date.today()
-
-    stmt = (
-        select(
-            Account.id.label("account_id"),
-            Account.name.label("name"),
-            Account.state_code.label("state_code"),
-            Account.city.label("city"),
-            Distributor.name.label("distributor_name"),
-            func.max(Depletion.period_month).label("last_active"),
-            func.coalesce(func.sum(Depletion.cases_9l), 0).label("total_9l"),
-            func.count(distinct(Depletion.product_id)).label("product_count"),
-        )
-        .select_from(Account)
-        .join(Depletion, Depletion.account_id == Account.id)
-        .join(Distributor, Distributor.id == Account.distributor_id, isouter=True)
-        .group_by(
-            Account.id,
-            Account.name,
-            Account.state_code,
-            Account.city,
-            Distributor.name,
-        )
-    )
-    rows = (await session.execute(stmt)).all()
-
-    buckets: dict[str, dict[str, Any]] = {
-        name: {"label": name, "count": 0, "total_9l": Decimal("0"), "accounts": []}
-        for name, _lo, _hi in _FOLLOW_UP_BUCKETS
-    }
-    for row in rows:
-        last_active: date = row.last_active
-        days = (ref - last_active).days
-        bucket_name: str | None = None
-        for name, lo, hi in _FOLLOW_UP_BUCKETS:
-            if days >= lo and (hi is None or days < hi):
-                bucket_name = name
-                break
-        if bucket_name is None:
-            continue
-        bucket = buckets[bucket_name]
-        bucket["count"] += 1
-        bucket["total_9l"] += row.total_9l
-        bucket["accounts"].append(
-            {
-                "account_id": row.account_id,
-                "name": row.name,
-                "state_code": row.state_code,
-                "city": row.city,
-                "distributor_name": row.distributor_name,
-                "last_active": last_active,
-                "days_since": days,
-                "total_9l": row.total_9l,
-                "product_count": row.product_count,
-            }
-        )
-
-    # Sort accounts within each bucket by days_since asc (most recent first).
-    for bucket in buckets.values():
-        bucket["accounts"].sort(key=lambda a: a["days_since"])
-
-    return {
-        "reference_date": ref,
-        "buckets": list(buckets.values()),
-    }
-
-
-# ----------------------------------------------------------------
-# New vs Lost Accounts (depletions)
-# ----------------------------------------------------------------
-
-
-async def get_new_vs_lost_accounts(
-    session: AsyncSession,
-    *,
-    window_months: int = 3,
-    reference_date: date | None = None,
-) -> dict[str, Any]:
-    """Compare account activity in two adjacent windows.
-
-    Recent window: ``[ref - 2*window, ref]`` -- last 3 months by default.
-    Prior window:  ``[ref - 4*window, ref - window]`` -- 3 months before.
-
-    Accounts active in recent but not prior = NEW.
-    Accounts active in prior but not recent = LOST.
-    Both buckets include the account's volume in their respective window.
-    """
-    latest: date | None = await session.scalar(select(func.max(Depletion.period_month)))
-    ref: date = reference_date or latest or date.today()
-
-    # Period boundaries -- approximate "months" as 30 days, since
-    # we're aligning to the first-of-month rule on Depletion.period_month.
-    recent_from = ref - timedelta(days=window_months * 31)
-    prior_from = recent_from - timedelta(days=window_months * 31)
-    prior_to = recent_from
-
-    def _window_query(start: date, end: date) -> Any:
-        return (
-            select(
-                Account.id.label("account_id"),
-                Account.name.label("name"),
-                Account.state_code.label("state_code"),
-                Account.city.label("city"),
-                Distributor.name.label("distributor_name"),
-                func.coalesce(func.sum(Depletion.cases_9l), 0).label("cases_9l"),
-            )
-            .select_from(Account)
-            .join(Depletion, Depletion.account_id == Account.id)
-            .join(Distributor, Distributor.id == Account.distributor_id, isouter=True)
-            .where(and_(Depletion.period_month >= start, Depletion.period_month < end))
-            .group_by(Account.id, Account.name, Account.state_code, Account.city, Distributor.name)
-        )
-
-    recent_result = await session.execute(_window_query(recent_from, ref + timedelta(days=1)))
-    recent_rows = {row.account_id: row for row in recent_result.all()}
-    prior_result = await session.execute(_window_query(prior_from, prior_to))
-    prior_rows = {row.account_id: row for row in prior_result.all()}
-
-    new_ids = set(recent_rows) - set(prior_rows)
-    lost_ids = set(prior_rows) - set(recent_rows)
-
-    def _to_dict(row: Any, cases: Decimal) -> dict[str, Any]:
-        return {
-            "account_id": row.account_id,
-            "name": row.name,
-            "state_code": row.state_code,
-            "city": row.city,
-            "distributor_name": row.distributor_name,
-            "cases_9l": cases,
-        }
-
-    new_accounts = [_to_dict(recent_rows[aid], recent_rows[aid].cases_9l) for aid in new_ids]
-    new_accounts.sort(key=lambda a: a["cases_9l"], reverse=True)
-
-    lost_accounts = [_to_dict(prior_rows[aid], prior_rows[aid].cases_9l) for aid in lost_ids]
-    lost_accounts.sort(key=lambda a: a["cases_9l"], reverse=True)
-
-    return {
-        "reference_date": ref,
-        "window_months": window_months,
-        "recent_window_start": recent_from,
-        "prior_window_start": prior_from,
-        "prior_window_end": prior_to,
-        "new_accounts": new_accounts,
-        "lost_accounts": lost_accounts,
-        "new_count": len(new_accounts),
-        "lost_count": len(lost_accounts),
-        "new_total_9l": sum((a["cases_9l"] for a in new_accounts), Decimal("0")),
-        "lost_total_9l": sum((a["cases_9l"] for a in lost_accounts), Decimal("0")),
-    }
-
-
-# ----------------------------------------------------------------
-# Velocity Analysis (depletions)
-# ----------------------------------------------------------------
-
-
-def _classify_velocity(
-    recent_avg: Decimal,
-    prior_avg: Decimal,
-    months_active: int,
-) -> tuple[float | None, str]:
-    """Return (velocity_change_pct, category)."""
-    if recent_avg == 0 and prior_avg == 0:
-        return None, "silent"
-    if prior_avg == 0:
-        return None, "new"
-    change = float((recent_avg - prior_avg) / prior_avg)
-    pct = change * 100
-    if months_active < 3:
-        return pct, "new"
-    if pct > 20:
-        return pct, "accelerating"
-    if pct < -20:
-        return pct, "declining"
-    return pct, "steady"
-
-
-async def get_velocity_analysis(
-    session: AsyncSession,
-    *,
-    recent_window_months: int = 3,
-) -> dict[str, Any]:
-    """Compute per-account depletion velocity over the available history."""
-    latest: date | None = await session.scalar(select(func.max(Depletion.period_month)))
-    ref: date = latest or date.today()
-    recent_cutoff = ref - timedelta(days=recent_window_months * 31)
-    prior_cutoff = recent_cutoff - timedelta(days=recent_window_months * 31)
-
-    stmt = (
-        select(
-            Account.id.label("account_id"),
-            Account.name.label("name"),
-            Account.state_code.label("state_code"),
-            Account.city.label("city"),
-            Distributor.name.label("distributor_name"),
-            Depletion.period_month.label("period_month"),
-            func.coalesce(func.sum(Depletion.cases_9l), 0).label("cases_9l"),
-        )
-        .select_from(Depletion)
-        .join(Account, Account.id == Depletion.account_id)
-        .join(Distributor, Distributor.id == Account.distributor_id, isouter=True)
-        .group_by(
-            Account.id,
-            Account.name,
-            Account.state_code,
-            Account.city,
-            Distributor.name,
-            Depletion.period_month,
-        )
-    )
-    rows = (await session.execute(stmt)).all()
-
-    by_account: dict[int, dict[str, Any]] = {}
-    for row in rows:
-        slot = by_account.setdefault(
-            row.account_id,
-            {
-                "account_id": row.account_id,
-                "name": row.name,
-                "state_code": row.state_code,
-                "city": row.city,
-                "distributor_name": row.distributor_name,
-                "points": [],
-            },
-        )
-        slot["points"].append((row.period_month, row.cases_9l))
-
-    accounts: list[dict[str, Any]] = []
-    category_totals: dict[str, dict[str, Any]] = {}
-    for slot in by_account.values():
-        points: list[tuple[date, Decimal]] = slot["points"]
-        months_active = len(points)
-        total_9l = sum((p[1] for p in points), Decimal("0"))
-        avg = (total_9l / months_active) if months_active > 0 else Decimal("0")
-        recent_pts = [p[1] for p in points if p[0] >= recent_cutoff]
-        prior_pts = [p[1] for p in points if prior_cutoff <= p[0] < recent_cutoff]
-        recent_avg = sum(recent_pts, Decimal("0")) / len(recent_pts) if recent_pts else Decimal("0")
-        prior_avg = sum(prior_pts, Decimal("0")) / len(prior_pts) if prior_pts else Decimal("0")
-        pct, category = _classify_velocity(recent_avg, prior_avg, months_active)
-
-        accounts.append(
-            {
-                "account_id": slot["account_id"],
-                "name": slot["name"],
-                "state_code": slot["state_code"],
-                "city": slot["city"],
-                "distributor_name": slot["distributor_name"],
-                "months_active": months_active,
-                "total_9l": total_9l,
-                "avg_9l_per_month": avg,
-                "recent_3m_avg": recent_avg,
-                "prior_3m_avg": prior_avg,
-                "velocity_change_pct": pct,
-                "category": category,
-            }
-        )
-
-        cat_slot = category_totals.setdefault(
-            category, {"category": category, "count": 0, "total_9l": Decimal("0")}
-        )
-        cat_slot["count"] += 1
-        cat_slot["total_9l"] += total_9l
-
-    accounts.sort(key=lambda a: cast(Decimal, a["total_9l"]), reverse=True)
-
-    category_order = ["accelerating", "steady", "declining", "new", "silent"]
-    category_stats = [category_totals[c] for c in category_order if c in category_totals]
-
-    return {
-        "reference_date": ref,
-        "accounts": accounts,
-        "category_stats": category_stats,
     }
