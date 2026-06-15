@@ -81,6 +81,7 @@ async def get_follow_up_tracker(
             DepAccount.county.label("county"),
             DepAccount.zip_code.label("zip_code"),
             DepAccount.distributor_code.label("distributor_code"),
+            DepAccount.premises_type.label("premises_type"),
             func.max(DepFact.period_month).label("last_active"),
             func.coalesce(func.sum(DepFact.cases_9l), 0).label("total_9l"),
             func.count(distinct(DepFact.product_id)).label("product_count"),
@@ -97,6 +98,7 @@ async def get_follow_up_tracker(
             DepAccount.county,
             DepAccount.zip_code,
             DepAccount.distributor_code,
+            DepAccount.premises_type,
         )
     )
     rows = (await session.execute(stmt)).all()
@@ -203,6 +205,7 @@ async def get_follow_up_tracker(
                 "recent_3m_9l": recent_3m_9l,
                 "prior_3m_9l": prior_3m_9l,
                 "velocity_pct": velocity_pct,
+                "premises_type": row.premises_type,
                 "monthly_series": monthly_series,
             }
         )
@@ -1696,6 +1699,7 @@ async def get_account_performance(
             DepAccount.county.label("county"),
             DepAccount.zip_code.label("zip_code"),
             DepAccount.distributor_code.label("distributor_code"),
+            DepAccount.premises_type.label("premises_type"),
             func.coalesce(func.sum(DepFact.cases_9l), 0).label("cases_9l"),
             func.coalesce(func.sum(DepFact.cases_physical), 0).label("cases_physical"),
             func.count(distinct(DepFact.product_id)).label("product_count"),
@@ -1716,6 +1720,7 @@ async def get_account_performance(
             DepAccount.county,
             DepAccount.zip_code,
             DepAccount.distributor_code,
+            DepAccount.premises_type,
         )
         .order_by(func.sum(DepFact.cases_9l).desc())
     )
@@ -1870,6 +1875,7 @@ async def get_account_performance(
                 "county": row.county,
                 "zip_code": row.zip_code,
                 "distributor_code": row.distributor_code,
+                "premises_type": row.premises_type,
                 "cases_9l": cases_9l,
                 "cases_physical": row.cases_physical,
                 "pct_of_9l": share,
@@ -1913,4 +1919,87 @@ async def get_account_performance(
         "accounts": items,
         "total_9l": total_9l,
         "top_10_share": top_10_share,
+    }
+
+
+# ----------------------------------------------------------------
+# Premises Mix
+# ----------------------------------------------------------------
+
+
+async def get_premises_summary(
+    session: AsyncSession,
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> dict[str, Any]:
+    """ON / OFF / NA / NULL account-count + 9L breakdown.
+
+    Counts every distinct account (whether it has facts in the range
+    or not) — this is a portfolio-shape view, not a sales view. The
+    9L sum, in contrast, IS range-filtered so the dashboard tile can
+    show "ON-premises shipped X 9L this year".
+    """
+    # Per-account 9L within the requested date range. Left-joined to
+    # accounts so accounts with zero range volume still count.
+    fact_clauses: list[Any] = []
+    if date_from is not None:
+        fact_clauses.append(DepFact.period_month >= date_from)
+    if date_to is not None:
+        fact_clauses.append(DepFact.period_month <= date_to)
+
+    range_9l_subq = (
+        select(
+            DepFact.account_id.label("account_id"),
+            func.sum(DepFact.cases_9l).label("acc_9l"),
+        )
+        .where(*fact_clauses)
+        .group_by(DepFact.account_id)
+        .subquery()
+    )
+
+    stmt = (
+        select(
+            DepAccount.premises_type.label("premises_type"),
+            func.count(DepAccount.id).label("account_count"),
+            func.coalesce(func.sum(range_9l_subq.c.acc_9l), 0).label("total_9l"),
+        )
+        .select_from(DepAccount)
+        .outerjoin(range_9l_subq, range_9l_subq.c.account_id == DepAccount.id)
+        .group_by(DepAccount.premises_type)
+    )
+    rows = (await session.execute(stmt)).all()
+
+    grand_9l: Decimal = sum((Decimal(r.total_9l) for r in rows), Decimal("0"))
+    grand_accounts: int = sum((r.account_count for r in rows), 0)
+
+    buckets: list[dict[str, Any]] = []
+    for r in rows:
+        total = Decimal(r.total_9l)
+        share = float(total / grand_9l) if grand_9l > 0 else 0.0
+        buckets.append(
+            {
+                "premises_type": r.premises_type,
+                "account_count": int(r.account_count),
+                "total_9l": total,
+                "pct_of_9l": share,
+            }
+        )
+
+    # Sort the response in a stable, semantic order: known classifications
+    # (OFF / ON / NA) first by descending account count, NULL last.
+    def _sort_key(b: dict[str, Any]) -> tuple[int, int]:
+        is_unknown = 1 if b["premises_type"] is None else 0
+        return (is_unknown, -int(b["account_count"]))
+
+    buckets.sort(key=_sort_key)
+
+    latest: date | None = await session.scalar(select(func.max(DepFact.period_month)))
+    ref: date = date_to or latest or date.today()
+
+    return {
+        "reference_date": ref,
+        "buckets": buckets,
+        "grand_total_9l": grand_9l,
+        "grand_total_accounts": grand_accounts,
     }

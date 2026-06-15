@@ -223,6 +223,15 @@ class FollowUpAccount(BaseModel):
     prior_3m_9l: Decimal
     velocity_pct: float | None
 
+    # Premises classification from the broker (iDIG OnOff Premises):
+    #   'ON'  — on-premises (bars, restaurants)
+    #   'OFF' — off-premises (liquor stores, retail)
+    #   'NA'  — broker actively classified as not-applicable
+    #   None  — we don't have this info yet (older accounts that
+    #           predate the column or haven't appeared in a
+    #           premises-aware file)
+    premises_type: str | None
+
     # 12-month per-month volume series ending at the reference month.
     # The UI renders this as a small inline bar sparkline so a rep can
     # eyeball the order pattern without reading any numbers.
@@ -694,6 +703,9 @@ class AccountPerformanceItem(BaseModel):
     county: str | None
     zip_code: str | None
     distributor_code: str | None
+    # Premises classification — 'ON' / 'OFF' / 'NA' / None (see
+    # FollowUpAccount.premises_type for semantics).
+    premises_type: str | None
 
     # Headline volume + share
     cases_9l: Decimal
@@ -749,3 +761,35 @@ class AccountPerformanceResponse(BaseModel):
     # Concentration — share of the top-10 accounts by 9L. UI flags
     # > 0.5 as "narrow customer base".
     top_10_share: float
+
+
+# ----------------------------------------------------------------
+# Premises Mix
+# ----------------------------------------------------------------
+
+
+class PremisesBucket(BaseModel):
+    """One row of the ON / OFF / NA / NULL breakdown.
+
+    ``premises_type`` is the literal column value (None for accounts
+    that don't carry the classification yet). ``account_count`` is the
+    number of distinct accounts in this bucket; ``total_9l`` is the
+    summed lifetime depletions volume for the bucket so the UI can
+    weight tiles by 9L as well as by account count.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    premises_type: str | None
+    account_count: int
+    total_9l: Decimal
+    pct_of_9l: float  # 0..1
+
+
+class PremisesSummaryResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    reference_date: date
+    buckets: list[PremisesBucket]
+    grand_total_9l: Decimal
+    grand_total_accounts: int

@@ -25,6 +25,7 @@ from hy_sales.schemas.strategic import (
     FollowUpTrackerResponse,
     GrowthDeclineResponse,
     NewVsLostAccountsResponse,
+    PremisesSummaryResponse,
     ProductPerformanceResponse,
     StatePerformanceResponse,
     VelocityAnalysisResponse,
@@ -42,6 +43,7 @@ from hy_sales.services.depletions_strategic import (
     get_follow_up_tracker,
     get_growth_decline,
     get_new_vs_lost_accounts,
+    get_premises_summary,
     get_product_performance,
     get_state_performance,
     get_velocity_analysis,
@@ -308,3 +310,18 @@ async def account_performance(
 ) -> AccountPerformanceResponse:
     data = await get_account_performance(session, date_from=date_from, date_to=date_to, limit=limit)
     return AccountPerformanceResponse.model_validate(data)
+
+
+@router.get(
+    "/premises-summary",
+    response_model=PremisesSummaryResponse,
+    summary="ON / OFF / NA / NULL breakdown of accounts with 9L volume share. "
+    "Account counts are over the full portfolio; 9L volumes respect the date range.",
+)
+async def premises_summary(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    date_from: DateFromParam = None,
+    date_to: DateToParam = None,
+) -> PremisesSummaryResponse:
+    data = await get_premises_summary(session, date_from=date_from, date_to=date_to)
+    return PremisesSummaryResponse.model_validate(data)
