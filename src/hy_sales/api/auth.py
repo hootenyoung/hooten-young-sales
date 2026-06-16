@@ -9,28 +9,25 @@ Token / reset-link semantics:
   ``must_change_password`` claim reflects current state.
 * ``/forgot-password`` always returns 200 regardless of whether the
   email exists — avoids email enumeration. Reset links are emitted
-  via the stub in :func:`_log_reset_link` (real SendGrid wiring is
+  via the stub in :func:`log_reset_link` (real SendGrid wiring is
   Phase 4).
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated
 
-import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from hy_sales.auth.audit import audit_event, client_ip, load_user_detail, log_reset_link
 from hy_sales.auth.dependencies import CurrentUser, get_current_user
 from hy_sales.db.session import get_session
 from hy_sales.models import (
-    AuthAuditLog,
     AuthPasswordResetToken,
-    AuthRole,
     AuthUser,
-    AuthUserRole,
 )
 from hy_sales.schemas.auth import (
     ChangePasswordRequest,
@@ -38,7 +35,6 @@ from hy_sales.schemas.auth import (
     LoginRequest,
     MessageResponse,
     ResetPasswordRequest,
-    RolePublic,
     SignupRequest,
     SignupResponse,
     TokenResponse,
@@ -53,98 +49,12 @@ from hy_sales.security import (
 )
 from hy_sales.settings import Settings, get_settings
 
-log = structlog.get_logger(__name__)
-
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 # ---------------------------------------------------------------------
-# Helpers
+# Local helpers (used only by this router)
 # ---------------------------------------------------------------------
-
-
-def _client_ip(request: Request) -> str | None:
-    """Best-effort client IP. Falls back to the socket peer."""
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
-
-
-def _audit(
-    session: AsyncSession,
-    *,
-    action: str,
-    user_id: Any | None = None,
-    metadata: dict[str, Any] | None = None,
-    request: Request | None = None,
-) -> None:
-    """Append a row to auth.audit_log. Commit happens with the session."""
-    session.add(
-        AuthAuditLog(
-            user_id=user_id,
-            action=action,
-            metadata_=metadata or {},
-            ip_address=_client_ip(request) if request else None,
-            user_agent=request.headers.get("user-agent") if request else None,
-        )
-    )
-
-
-def _log_reset_link(
-    *,
-    email: str,
-    plaintext_token: str,
-    purpose: str,
-    settings: Settings,
-) -> None:
-    """Stub for the password-reset email.
-
-    Logs the reset URL via structlog so a developer can copy it from
-    server output during local development. Real SendGrid wiring
-    happens in Phase 4 (Task #119). When that lands, this function
-    will compose the email and send it; the log line will remain at
-    DEBUG level as a development aid.
-    """
-    reset_url = f"{settings.frontend_reset_url}?token={plaintext_token}"
-    log.info(
-        "auth.reset_link_issued",
-        email=email,
-        purpose=purpose,
-        reset_url=reset_url,
-        ttl_hours=settings.password_reset_ttl_hours,
-    )
-
-
-async def _load_user_detail(session: AsyncSession, user: AuthUser) -> UserDetail:
-    """Materialize a ``UserDetail`` for ``user`` (loads roles)."""
-    role_rows = await session.execute(
-        select(AuthRole)
-        .join(AuthUserRole, AuthUserRole.role_id == AuthRole.id)
-        .where(AuthUserRole.user_id == user.id)
-        .order_by(AuthRole.name)
-    )
-    roles = [
-        RolePublic(
-            id=r.id,
-            name=r.name,
-            display_name=r.display_name,
-            description=r.description,
-            is_system=r.is_system,
-        )
-        for r in role_rows.scalars().all()
-    ]
-    return UserDetail(
-        id=user.id,
-        email=user.email,
-        first_name=user.first_name,
-        last_name=user.last_name,
-        status=user.status,
-        must_change_password=user.must_change_password,
-        last_login_at=user.last_login_at,
-        created_at=user.created_at,
-        roles=roles,
-    )
 
 
 def _issue_token(user: AuthUser, settings: Settings) -> TokenResponse:
@@ -197,7 +107,7 @@ async def signup(
     session.add(user)
     await session.flush()  # populate user.id
 
-    _audit(
+    audit_event(
         session,
         action="signup_submitted",
         user_id=user.id,
@@ -227,7 +137,7 @@ async def login(
     user = result.scalar_one_or_none()
 
     if user is None or not verify_password(payload.password, user.password_hash):
-        _audit(
+        audit_event(
             session,
             action="login_failed",
             user_id=user.id if user else None,
@@ -240,7 +150,7 @@ async def login(
         )
 
     if user.status != "active":
-        _audit(
+        audit_event(
             session,
             action="login_failed",
             user_id=user.id,
@@ -256,7 +166,7 @@ async def login(
         )
 
     user.last_login_at = datetime.now(UTC)
-    _audit(
+    audit_event(
         session,
         action="login_success",
         user_id=user.id,
@@ -283,7 +193,7 @@ async def me(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found",
         )
-    return await _load_user_detail(session, user)
+    return await load_user_detail(session, user)
 
 
 @router.post("/forgot-password", response_model=MessageResponse)
@@ -300,7 +210,7 @@ async def forgot_password(
     user = result.scalar_one_or_none()
 
     # Always audit the attempt, even for unknown emails (forensics).
-    _audit(
+    audit_event(
         session,
         action="password_reset_requested",
         user_id=user.id if user else None,
@@ -317,10 +227,10 @@ async def forgot_password(
                 token_hash=digest,
                 purpose="forgot_password",
                 expires_at=expires_at,
-                requested_by_ip=_client_ip(request),
+                requested_by_ip=client_ip(request),
             )
         )
-        _log_reset_link(
+        log_reset_link(
             email=user.email,
             plaintext_token=plaintext,
             purpose="forgot_password",
@@ -359,7 +269,7 @@ async def reset_password(
     now = datetime.now(UTC)
     invalid = reset_row is None or reset_row.used_at is not None or reset_row.expires_at <= now
     if invalid:
-        _audit(
+        audit_event(
             session,
             action="password_reset_failed",
             user_id=reset_row.user_id if reset_row else None,
@@ -384,7 +294,7 @@ async def reset_password(
     user.must_change_password = False
     reset_row.used_at = now
 
-    _audit(
+    audit_event(
         session,
         action="password_set",
         user_id=user.id,
@@ -416,7 +326,7 @@ async def change_password(
         )
 
     if not verify_password(payload.current_password, user.password_hash):
-        _audit(
+        audit_event(
             session,
             action="password_change_failed",
             user_id=user.id,
@@ -433,7 +343,7 @@ async def change_password(
 
     user.password_hash = hash_password(payload.new_password)
     user.must_change_password = False
-    _audit(
+    audit_event(
         session,
         action="password_changed",
         user_id=user.id,

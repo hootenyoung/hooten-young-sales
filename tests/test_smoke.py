@@ -87,3 +87,9 @@ def test_app_factory_returns_fastapi() -> None:
     assert "/api/auth/forgot-password" in paths
     assert "/api/auth/reset-password" in paths
     assert "/api/auth/change-password" in paths
+    assert "/api/admin/users" in paths
+    assert "/api/admin/users/{user_id}" in paths
+    assert "/api/admin/users/{user_id}/roles" in paths
+    assert "/api/admin/users/{user_id}/status" in paths
+    assert "/api/admin/roles" in paths
+    assert "/api/admin/audit-log" in paths

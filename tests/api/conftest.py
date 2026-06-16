@@ -108,10 +108,7 @@ async def create_user() -> AsyncIterator[CreateUserFn]:
     yield _make
 
     if created_ids:
-        async with async_session_factory() as s:
-            await s.execute(delete(AuthAuditLog).where(AuthAuditLog.user_id.in_(created_ids)))
-            await s.execute(delete(AuthUser).where(AuthUser.id.in_(created_ids)))
-            await s.commit()
+        await _cascade_delete_users(created_ids)
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -124,10 +121,41 @@ async def _scrub_orphan_test_users() -> AsyncIterator[None]:
             .scalars()
             .all()
         )
-        if orphan_ids:
-            await s.execute(delete(AuthAuditLog).where(AuthAuditLog.user_id.in_(orphan_ids)))
-            await s.execute(delete(AuthUser).where(AuthUser.id.in_(orphan_ids)))
-            await s.commit()
+    if orphan_ids:
+        await _cascade_delete_users(orphan_ids)
+
+
+async def _cascade_delete_users(user_ids: list[Any]) -> None:
+    """Delete test users + their dependent rows in the right order.
+
+    auth.users has TWO references that don't cascade:
+      * auth.audit_log.user_id  → who the row is about
+      * auth.users.created_by   → admin who created this user (self-FK)
+      * auth.users.assigned_by  in user_roles (not the test users)
+
+    So we must:
+      1. Delete audit_log rows referencing the test users.
+      2. NULL out created_by + assigned_by references so siblings
+         deleted in the same batch don't trip the FK.
+      3. Delete the users themselves (user_roles + password_reset_tokens
+         CASCADE automatically).
+    """
+    from sqlalchemy import update
+
+    from hy_sales.models import AuthUserRole
+
+    async with async_session_factory() as s:
+        await s.execute(delete(AuthAuditLog).where(AuthAuditLog.user_id.in_(user_ids)))
+        await s.execute(
+            update(AuthUser).where(AuthUser.created_by.in_(user_ids)).values(created_by=None)
+        )
+        await s.execute(
+            update(AuthUserRole)
+            .where(AuthUserRole.assigned_by.in_(user_ids))
+            .values(assigned_by=None)
+        )
+        await s.execute(delete(AuthUser).where(AuthUser.id.in_(user_ids)))
+        await s.commit()
 
 
 async def login(client: AsyncClient, email: str, password: str) -> str:
