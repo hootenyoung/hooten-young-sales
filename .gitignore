@@ -58,5 +58,8 @@ Thumbs.db
 data/raw/
 data/processed/
 
+# Broker xlsx feeds — sensitive commercial data, ingested then discarded
+*.xlsx
+
 # Vercel (in case any frontend tooling ends up here)
 .vercel/

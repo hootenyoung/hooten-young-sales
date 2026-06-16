@@ -1,6 +1,6 @@
 """SQLAlchemy 2.0 ORM models for the Hooten Young backend.
 
-Two physically isolated domains, two Postgres schemas:
+Three physically isolated domains, three Postgres schemas:
 
 * ``sales`` — QuickBooks-feed wholesale sales (invoices to distributors).
     AppConfig, Customer, CustomerAlias, Distributor, FileUpload, Invoice,
@@ -8,6 +8,9 @@ Two physically isolated domains, two Postgres schemas:
 
 * ``depletions`` — iDIG-feed retail pull-through.
     DepAccount, DepFact, DepFileUpload, DepProduct, DepProductAlias.
+
+* ``auth`` — authentication + authorization.
+    AuthRole, AuthUser, AuthUserRole, AuthPasswordResetToken, AuthAuditLog.
 
 The SQL migrations under ``db/migrations/`` are the source of truth for
 table structure. These models never CREATE or ALTER tables (we never
@@ -18,6 +21,11 @@ smoke test that enumerates known tables can see them all.
 """
 
 from hy_sales.models.app_config import AppConfig
+from hy_sales.models.auth_audit_log import AuthAuditLog
+from hy_sales.models.auth_password_reset_token import AuthPasswordResetToken
+from hy_sales.models.auth_role import AuthRole
+from hy_sales.models.auth_user import AuthUser
+from hy_sales.models.auth_user_role import AuthUserRole
 from hy_sales.models.base import Base
 from hy_sales.models.customer import Customer
 from hy_sales.models.customer_alias import CustomerAlias
@@ -35,6 +43,11 @@ from hy_sales.models.product_alias import ProductAlias
 
 __all__ = [
     "AppConfig",
+    "AuthAuditLog",
+    "AuthPasswordResetToken",
+    "AuthRole",
+    "AuthUser",
+    "AuthUserRole",
     "Base",
     "Customer",
     "CustomerAlias",

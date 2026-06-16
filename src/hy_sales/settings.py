@@ -44,6 +44,45 @@ class Settings(BaseSettings):
         description="Logging level: DEBUG | INFO | WARNING | ERROR",
     )
 
+    # ---- Authentication / JWT -------------------------------------
+    # Signing secret for JWT access tokens. MUST be a long random
+    # string in prod (>=64 chars). Generate with: openssl rand -hex 64
+    # Different secret per environment; rotating it invalidates every
+    # existing token, forcing a re-login.
+    jwt_secret: str = Field(
+        ...,
+        description="HMAC signing secret for JWT access tokens. Required.",
+    )
+    jwt_algorithm: str = Field(
+        default="HS256",
+        description="JWT signing algorithm. HS256 = HMAC-SHA256 with jwt_secret.",
+    )
+    jwt_access_ttl_hours: int = Field(
+        default=24,
+        description=(
+            "Access token lifetime in hours. No refresh tokens; user re-logs in after expiry."
+        ),
+    )
+
+    # ---- Password reset / set-password ----------------------------
+    # TTL for both the forgot-password flow and the admin-creates-user
+    # set-password flow. The same auth.password_reset_tokens table
+    # powers both; the `purpose` column distinguishes them.
+    password_reset_ttl_hours: int = Field(
+        default=24,
+        description="Password reset / set-password token lifetime in hours.",
+    )
+
+    # Frontend URL where password-reset emails point. The token is
+    # appended as ?token=<plaintext>. E.g.:
+    #   local: http://localhost:5173/auth/reset-password
+    #   dev:   https://dashboard-dev.hootenyoung.com/auth/reset-password
+    #   prod:  https://dashboard.hootenyoung.com/auth/reset-password
+    frontend_reset_url: str = Field(
+        ...,
+        description="Frontend URL for password-reset links. Token is appended as ?token=...",
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

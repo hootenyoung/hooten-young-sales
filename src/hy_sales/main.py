@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from hy_sales import __version__
+from hy_sales.api.auth import router as auth_router
 from hy_sales.api.depletions import router as depletions_router
 from hy_sales.api.health import router as health_router
 from hy_sales.api.sales import router as sales_router
@@ -69,6 +70,7 @@ def create_app() -> FastAPI:
     )
 
     fastapi_app.include_router(health_router)
+    fastapi_app.include_router(auth_router)
     fastapi_app.include_router(sales_router)
     fastapi_app.include_router(depletions_router)
     return fastapi_app

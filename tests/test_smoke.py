@@ -11,12 +11,12 @@ def test_package_imports() -> None:
 
 
 def test_models_register_under_known_schemas() -> None:
-    """Every ORM table registers under the 'sales' or 'depletions' schema."""
+    """Every ORM table registers under the 'sales' / 'depletions' / 'auth' schema."""
     from hy_sales.models import Base
 
     assert Base.metadata.tables, "no models registered"
     for table in Base.metadata.tables.values():
-        assert table.schema in {"sales", "depletions"}, (
+        assert table.schema in {"sales", "depletions", "auth"}, (
             f"Table {table.schema}.{table.name!r} is not in an allowed schema"
         )
 
@@ -43,6 +43,12 @@ def test_models_match_expected_tables() -> None:
         "depletions.product_aliases",
         "depletions.accounts",
         "depletions.facts",
+        # Auth schema — identity + role-based access
+        "auth.roles",
+        "auth.users",
+        "auth.user_roles",
+        "auth.password_reset_tokens",
+        "auth.audit_log",
     }
     assert table_names == expected, (
         f"Unexpected tables. Missing: {expected - table_names}, Extra: {table_names - expected}"
@@ -75,3 +81,9 @@ def test_app_factory_returns_fastapi() -> None:
     assert "/api/sales/white-space" in paths
     assert "/api/sales/order-analysis" in paths
     assert "/api/sales/risk" in paths
+    assert "/api/auth/signup" in paths
+    assert "/api/auth/login" in paths
+    assert "/api/auth/me" in paths
+    assert "/api/auth/forgot-password" in paths
+    assert "/api/auth/reset-password" in paths
+    assert "/api/auth/change-password" in paths

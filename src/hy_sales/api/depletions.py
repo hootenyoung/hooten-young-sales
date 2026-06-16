@@ -7,6 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from hy_sales.auth.dependencies import require_role
 from hy_sales.db.session import get_session
 from hy_sales.schemas.depletions import (
     AccountMonthlyGridResponse,
@@ -49,7 +50,14 @@ from hy_sales.services.depletions_strategic import (
     get_velocity_analysis,
 )
 
-router = APIRouter(prefix="/api/depletions", tags=["depletions"])
+# Every endpoint under /api/depletions/* requires the `depletions` role.
+# Users with the role pass through; without it, FastAPI short-circuits
+# with a structured 403 from auth.dependencies.require_role.
+router = APIRouter(
+    prefix="/api/depletions",
+    tags=["depletions"],
+    dependencies=[Depends(require_role("depletions"))],
+)
 
 
 DateFromParam = Annotated[

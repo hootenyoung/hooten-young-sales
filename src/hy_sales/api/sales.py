@@ -7,6 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from hy_sales.auth.dependencies import require_role
 from hy_sales.db.session import get_session
 from hy_sales.schemas.sales import (
     DistributorPerformance,
@@ -37,7 +38,14 @@ from hy_sales.services.strategic_queries import (
     get_white_space_matrix,
 )
 
-router = APIRouter(prefix="/api/sales", tags=["sales"])
+# Every endpoint under /api/sales/* requires the `distribution` role.
+# /api/sales serves the Distribution dashboard sections — depletions data
+# is gated separately under /api/depletions/* with the `depletions` role.
+router = APIRouter(
+    prefix="/api/sales",
+    tags=["sales"],
+    dependencies=[Depends(require_role("distribution"))],
+)
 
 
 DateFromParam = Annotated[
