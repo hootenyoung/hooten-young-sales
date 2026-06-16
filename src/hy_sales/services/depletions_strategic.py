@@ -777,6 +777,7 @@ async def get_product_performance(
             acct_subq_cte.c.account_id,
             acct_subq_cte.c.account_name,
             acct_subq_cte.c.state_code,
+            acct_subq_cte.c.premises_type,
             acct_subq_cte.c.account_9l,
             func.row_number()
             .over(
@@ -1009,6 +1010,7 @@ async def get_product_performance(
                 "account_id": a["account_id"],
                 "name": a["name"],
                 "state_code": a["state_code"],
+                "premises_type": a.get("premises_type"),
                 "cases_9l": a["cases_9l"],
                 "share": (
                     float(cast(Decimal, a["cases_9l"]) / cases_9l)
@@ -1554,6 +1556,7 @@ async def get_state_performance(
                 "account_id": a["account_id"],
                 "name": a["name"],
                 "city": a["city"],
+                "premises_type": a.get("premises_type"),
                 "cases_9l": a["cases_9l"],
                 "share": (
                     float(cast(Decimal, a["cases_9l"]) / cases_9l)
