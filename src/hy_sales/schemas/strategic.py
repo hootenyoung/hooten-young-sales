@@ -814,6 +814,25 @@ class PremisesBucket(BaseModel):
     pct_of_9l: float  # 0..1
 
 
+class PremisesYearlyBucket(BaseModel):
+    """One (premises_type, year) cell of the year-over-year comparison.
+
+    Mirrors :class:`StateYearlyVolume` semantics so the dashboard
+    can reuse the same YTD-marking pattern. ``is_ytd`` is True for
+    the calendar year that contains the reference month — the value
+    is year-to-date rather than a full twelve months. ``months_covered``
+    lets the UI render "Jan-Jun 2026" labels for the partial year.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    premises_type: str | None
+    year: int
+    cases_9l: Decimal
+    is_ytd: bool
+    months_covered: int
+
+
 class PremisesSummaryResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -821,3 +840,7 @@ class PremisesSummaryResponse(BaseModel):
     buckets: list[PremisesBucket]
     grand_total_9l: Decimal
     grand_total_accounts: int
+    # Year-over-year breakdown per premises_type. One entry per
+    # (premises_type, year) cell — the dashboard pivots it into a
+    # grouped-bar chart (X = year, bars = ON/OFF/NA/Unknown).
+    yearly_history: list[PremisesYearlyBucket]

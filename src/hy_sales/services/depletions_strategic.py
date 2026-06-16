@@ -2039,10 +2039,48 @@ async def get_premises_summary(
 
     latest: date | None = await session.scalar(select(func.max(DepFact.period_month)))
     ref: date = date_to or latest or date.today()
+    ref_year = ref.year
+
+    # Year-over-year breakdown per premises_type. The dashboard pivots
+    # this into a grouped-bar chart so reps can see whether (e.g.) ON-
+    # premise volume is recovering year-over-year. The range filter
+    # still applies — restrict to date_from/date_to if provided.
+    yearly_stmt = (
+        select(
+            DepAccount.premises_type.label("premises_type"),
+            func.extract("year", DepFact.period_month).label("year"),
+            func.coalesce(func.sum(DepFact.cases_9l), 0).label("cases_9l"),
+            func.count(distinct(DepFact.period_month)).label("months_covered"),
+        )
+        .select_from(DepFact)
+        .join(DepAccount, DepAccount.id == DepFact.account_id)
+        .where(*fact_clauses)
+        .group_by(
+            DepAccount.premises_type,
+            func.extract("year", DepFact.period_month),
+        )
+        .order_by(
+            DepAccount.premises_type,
+            func.extract("year", DepFact.period_month),
+        )
+    )
+    yearly_history: list[dict[str, Any]] = []
+    for yr in (await session.execute(yearly_stmt)).all():
+        year_int = int(yr.year)
+        yearly_history.append(
+            {
+                "premises_type": yr.premises_type,
+                "year": year_int,
+                "cases_9l": yr.cases_9l,
+                "months_covered": int(yr.months_covered),
+                "is_ytd": year_int == ref_year,
+            }
+        )
 
     return {
         "reference_date": ref,
         "buckets": buckets,
         "grand_total_9l": grand_9l,
         "grand_total_accounts": grand_accounts,
+        "yearly_history": yearly_history,
     }
