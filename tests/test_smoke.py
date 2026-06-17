@@ -98,3 +98,4 @@ def test_app_factory_returns_fastapi() -> None:
     assert "/api/admin/roles" in paths
     assert "/api/admin/audit-log" in paths
     assert "/api/feedback" in paths
+    assert "/api/platform/locked-sections" in paths
