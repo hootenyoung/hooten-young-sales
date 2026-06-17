@@ -17,6 +17,7 @@ tools), so a clean text fallback matters.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 # Brand palette — kept in sync with the dashboard's `theme.ts`.
 _GOLD = "#bb8c3f"
@@ -42,38 +43,51 @@ def _content_for_purpose(*, purpose: str, recipient_first_name: str) -> tuple[st
 
     if purpose == "set_password":
         return (
-            "You're invited to Hooten Young",
-            "Welcome to Hooten Young",
+            "Your Hooten Young Ops Platform account is ready",
+            "Welcome to the Hooten Young Ops Platform",
             (
-                f"Hi {name}, an administrator has added you to the Hooten Young internal "
-                "platform. Click the button below to set your password and finish creating "
-                "your account."
+                f"Hi {name}, a new account has been created for you on the Hooten Young "
+                "Ops Platform. Click the button below to choose a password and finish "
+                "setting up your account."
             ),
-            "Set your password",
+            "Finish account setup",
         )
     if purpose == "admin_initiated":
         return (
-            "Your Hooten Young password has been reset",
-            "Password reset",
+            "Your Hooten Young Ops Platform password has been reset",
+            "Your password has been reset",
             (
-                f"Hi {name}, an administrator has reset your password. Click the button "
-                "below to choose a new one — you'll need to do this before you can sign "
-                "in again."
+                f"Hi {name}, an administrator has reset your password on the Hooten Young "
+                "Ops Platform. Click the button below to choose a new one — you'll need "
+                "to do this before you can sign in again."
             ),
-            "Choose a new password",
+            "Set new password",
         )
     # Default = self-service "forgot password" flow
     return (
-        "Reset your Hooten Young password",
+        "Reset your Hooten Young Ops Platform password",
         "Reset your password",
         (
             f"Hi {name}, we received a request to reset the password on your Hooten Young "
-            "account. Click the button below to choose a new one. If you didn't request "
-            "this, you can safely ignore this email — your current password will keep "
-            "working."
+            "Ops Platform account. Click the button below to choose a new one. If you "
+            "didn't request this, you can safely ignore this email — your current "
+            "password will keep working."
         ),
-        "Reset your password",
+        "Reset password",
     )
+
+
+def _derive_logo_url(reset_url: str) -> str:
+    """Build the brand-logo URL for the email header.
+
+    The dashboard SPA already serves ``/brand/hy-logo.png`` at the
+    same origin it serves the reset-password page from, so we can
+    just lift the origin off the reset URL.  That keeps the logo
+    environment-aware automatically (dev → ops-dev, prod → ops)
+    without adding another settings field.
+    """
+    parsed = urlparse(reset_url)
+    return f"{parsed.scheme}://{parsed.netloc}/brand/hy-logo.png"
 
 
 def render_reset_email(
@@ -100,6 +114,7 @@ def render_reset_email(
         cta_label=cta_label,
         reset_url=reset_url,
         ttl_hours=ttl_hours,
+        logo_url=_derive_logo_url(reset_url),
         gold=_GOLD,
         gold_light=_GOLD_LIGHT,
         gold_dark=_GOLD_DARK,
@@ -143,13 +158,22 @@ _HTML_TEMPLATE = """\
               <td style="height:3px; background-image: linear-gradient(to right, {gold} 0%, {gold_light} 50%, {gold} 100%); line-height:0; font-size:0;">&nbsp;</td>
             </tr>
 
-            <!-- Brand eyebrow -->
+            <!-- Brand lockup — actual logo image, centered.  Falls
+                 back to alt text in clients that block remote images
+                 (Gmail before "Display below" tap, Outlook, etc.). -->
             <tr>
-              <td style="padding: 36px 40px 0; text-align:left;">
-                <div style="font-size:11px; font-weight:700; letter-spacing:0.28em; text-transform:uppercase; color:{gold};">
-                  Hooten &middot; Young
-                </div>
-                <div style="margin-top:6px; height:1px; width:42px; background-color:{gold}; opacity:0.7;"></div>
+              <td style="padding: 36px 40px 12px; text-align:center;">
+                <img src="{logo_url}"
+                     alt="Hooten Young"
+                     width="160"
+                     style="display:inline-block; height:auto; max-width:160px; width:160px; border:0; outline:none; text-decoration:none;" />
+              </td>
+            </tr>
+
+            <!-- Hairline gold rule under the logo -->
+            <tr>
+              <td style="padding: 0 40px;" align="center">
+                <div style="height:1px; width:48px; background-color:{gold}; opacity:0.7; margin: 0 auto;">&nbsp;</div>
               </td>
             </tr>
 
