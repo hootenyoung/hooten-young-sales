@@ -22,6 +22,7 @@ smoke test that enumerates known tables can see them all.
 
 from hy_sales.models.app_config import AppConfig
 from hy_sales.models.auth_audit_log import AuthAuditLog
+from hy_sales.models.auth_feedback import AuthFeedback
 from hy_sales.models.auth_password_reset_token import AuthPasswordResetToken
 from hy_sales.models.auth_role import AuthRole
 from hy_sales.models.auth_user import AuthUser
@@ -38,12 +39,14 @@ from hy_sales.models.distributor import Distributor
 from hy_sales.models.file_upload import FileUpload
 from hy_sales.models.invoice import Invoice
 from hy_sales.models.invoice_line import InvoiceLine
+from hy_sales.models.platform_app_config import PlatformAppConfig
 from hy_sales.models.product import Product
 from hy_sales.models.product_alias import ProductAlias
 
 __all__ = [
     "AppConfig",
     "AuthAuditLog",
+    "AuthFeedback",
     "AuthPasswordResetToken",
     "AuthRole",
     "AuthUser",
@@ -60,6 +63,7 @@ __all__ = [
     "FileUpload",
     "Invoice",
     "InvoiceLine",
+    "PlatformAppConfig",
     "Product",
     "ProductAlias",
 ]

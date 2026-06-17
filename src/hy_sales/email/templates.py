@@ -1,11 +1,14 @@
 """Branded HTML + plaintext bodies for transactional emails.
 
-Two families:
+Three families:
 
 * :func:`render_reset_email` — the password-reset / set-password /
   admin-initiated-reset templates (recipient is the user themselves).
 * :func:`render_admin_signup_notification` — sent to admins when a
   new sign-up request lands in Pending Approvals.
+* :func:`render_feedback_email` — sent to the configured feedback
+  recipients (platform.app_config.feedback_recipients) when a user
+  submits feedback via the dashboard's Feedback pill.
 
 Plaintext bodies are generated alongside the HTML; some recipients
 won't render the HTML version (corporate filters, accessibility
@@ -14,6 +17,7 @@ tools), so a clean text fallback matters.
 
 from __future__ import annotations
 
+import html as html_lib
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -442,6 +446,234 @@ _ADMIN_SIGNUP_HTML = """\
           </table>
 
           <!-- Outer copyright -->
+          <p style="margin:24px 0 0; font-size:10.5px; letter-spacing:0.18em; text-transform:uppercase; color:{muted}; opacity:0.7;">
+            &copy; Hooten Young American Whiskey
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
+
+
+# ---------------------------------------------------------------------
+# User-feedback email
+# ---------------------------------------------------------------------
+
+# Visual identity per category — same gradient pattern as the
+# dashboard's audit-log tone chips, just expressed as inline-style
+# HTML so it survives the various email-client style strippers.
+_FEEDBACK_TONES: dict[str, dict[str, str]] = {
+    "idea": {
+        "label": "Idea",
+        "emoji": "\U0001f4a1",
+        "bg": "#fff7e6",
+        "border": "#f0c870",
+        "fg": "#8b6b1a",
+    },
+    "bug": {
+        "label": "Bug",
+        "emoji": "\U0001f41b",
+        "bg": "#fdecec",
+        "border": "#f3a8a8",
+        "fg": "#a13434",
+    },
+    "praise": {
+        "label": "Love",
+        "emoji": "❤️",
+        "bg": "#fde8ec",
+        "border": "#f1b3c2",
+        "fg": "#9b2a48",
+    },
+    "other": {
+        "label": "Other",
+        "emoji": "\U0001f4ac",
+        "bg": "#f4ede0",
+        "border": "#d5c4a3",
+        "fg": "#5a4a35",
+    },
+}
+
+
+def render_feedback_email(
+    *,
+    category: str,
+    message: str,
+    page_path: str | None,
+    allow_followup: bool,
+    submitter_first_name: str,
+    submitter_last_name: str,
+    submitter_email: str,
+    submitted_at_display: str,
+    feedback_id: int,
+    reference_url: str,
+) -> RenderedEmail:
+    """Build the email sent to feedback recipients.
+
+    ``reference_url`` is any frontend URL — usually the deployed
+    dashboard's reset URL — that we use to derive the logo origin so
+    each environment's email uses the right brand asset.
+    """
+    tone = _FEEDBACK_TONES.get(category, _FEEDBACK_TONES["other"])
+    submitter_name = f"{submitter_first_name} {submitter_last_name}".strip() or submitter_email
+    page_path_display = page_path or "—"
+
+    subject = f"[HY Ops Feedback] {tone['label']} from {submitter_name}"
+
+    # Escape user-supplied content — never trust it in the HTML body.
+    safe_message = html_lib.escape(message).replace("\n", "<br />")
+    safe_submitter_name = html_lib.escape(submitter_name)
+    safe_submitter_email = html_lib.escape(submitter_email)
+    safe_page_path = html_lib.escape(page_path_display)
+
+    html_body = _FEEDBACK_HTML.format(
+        subject=subject,
+        category_label=tone["label"],
+        category_emoji=tone["emoji"],
+        category_bg=tone["bg"],
+        category_border=tone["border"],
+        category_fg=tone["fg"],
+        submitter_name=safe_submitter_name,
+        submitter_email=safe_submitter_email,
+        page_path_display=safe_page_path,
+        allow_followup="Yes" if allow_followup else "No",
+        submitted_at_display=submitted_at_display,
+        feedback_id=feedback_id,
+        message_html=safe_message,
+        logo_url=_derive_logo_url(reference_url),
+        gold=_GOLD,
+        gold_light=_GOLD_LIGHT,
+        ivory=_IVORY,
+        ink=_INK,
+        muted=_MUTED,
+    )
+
+    text_body = (
+        f"New feedback received\n"
+        f"---------------------\n\n"
+        f"Category:  {tone['label']}\n"
+        f"From:      {submitter_name} <{submitter_email}>\n"
+        f"Page:      {page_path_display}\n"
+        f"Follow-up: {'Yes' if allow_followup else 'No'}\n"
+        f"Submitted: {submitted_at_display}\n"
+        f"ID:        {feedback_id}\n\n"
+        f"Message\n"
+        f"-------\n"
+        f"{message}\n\n"
+        f"— Hooten Young Ops Platform"
+    )
+
+    return RenderedEmail(subject=subject, html_body=html_body, text_body=text_body)
+
+
+_FEEDBACK_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{subject}</title>
+  </head>
+  <body style="margin:0; padding:0; background-color:{ivory}; font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif; color:{ink};">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:{ivory};">
+      <tr>
+        <td align="center" style="padding: 40px 20px;">
+          <table role="presentation" width="600" cellspacing="0" cellpadding="0" border="0" style="max-width:600px; width:100%; background-color:#ffffff; border:1px solid rgba(187,140,63,0.22); border-radius:8px; overflow:hidden;">
+
+            <tr>
+              <td style="height:3px; background-image: linear-gradient(to right, {gold} 0%, {gold_light} 50%, {gold} 100%); line-height:0; font-size:0;">&nbsp;</td>
+            </tr>
+
+            <tr>
+              <td style="padding: 36px 40px 12px; text-align:center;">
+                <img src="{logo_url}" alt="Hooten Young" width="160"
+                     style="display:inline-block; height:auto; max-width:160px; width:160px; border:0; outline:none; text-decoration:none;" />
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding: 0 40px;" align="center">
+                <div style="height:1px; width:48px; background-color:{gold}; opacity:0.7; margin: 0 auto;">&nbsp;</div>
+              </td>
+            </tr>
+
+            <!-- Category chip + headline -->
+            <tr>
+              <td style="padding: 24px 40px 8px; text-align:left;">
+                <span style="display:inline-block; padding: 5px 12px; border-radius: 999px; background-color:{category_bg}; border:1px solid {category_border}; color:{category_fg}; font-size:12px; font-weight:700; letter-spacing:0.04em;">
+                  {category_emoji} &nbsp;{category_label}
+                </span>
+                <h1 style="margin:14px 0 0; font-family:'Inter','Helvetica Neue',Arial,sans-serif; font-size:22px; font-weight:700; letter-spacing:-0.015em; line-height:1.2; color:{ink};">
+                  New feedback received
+                </h1>
+              </td>
+            </tr>
+
+            <!-- Submitter details card -->
+            <tr>
+              <td style="padding: 20px 40px 0; text-align:left;">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse; background-color:rgba(187,140,63,0.06); border:1px solid rgba(187,140,63,0.22); border-radius:6px;">
+                  <tr>
+                    <td style="padding: 12px 18px; border-bottom: 1px dashed rgba(187,140,63,0.22);">
+                      <span style="font-size:10px; font-weight:700; letter-spacing:0.22em; text-transform:uppercase; color:{gold};">From</span><br />
+                      <span style="font-size:13.5px; font-weight:600; color:{ink};">{submitter_name}</span>
+                      <span style="font-family:'Courier New',monospace; font-size:12px; color:{muted};">&nbsp;&middot;&nbsp;{submitter_email}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 18px; border-bottom: 1px dashed rgba(187,140,63,0.22);">
+                      <span style="font-size:10px; font-weight:700; letter-spacing:0.22em; text-transform:uppercase; color:{gold};">Page</span><br />
+                      <span style="font-family:'Courier New',monospace; font-size:12.5px; color:{ink};">{page_path_display}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 18px; border-bottom: 1px dashed rgba(187,140,63,0.22);">
+                      <span style="font-size:10px; font-weight:700; letter-spacing:0.22em; text-transform:uppercase; color:{gold};">OK to follow up</span><br />
+                      <span style="font-size:13px; color:{ink};">{allow_followup}</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding: 12px 18px;">
+                      <span style="font-size:10px; font-weight:700; letter-spacing:0.22em; text-transform:uppercase; color:{gold};">Submitted</span><br />
+                      <span style="font-size:13px; color:{muted};">{submitted_at_display}</span>
+                      <span style="font-family:'Courier New',monospace; font-size:11.5px; color:{muted}; opacity:0.7;">&nbsp;&middot;&nbsp;#{feedback_id}</span>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <!-- Message body -->
+            <tr>
+              <td style="padding: 24px 40px 8px; text-align:left;">
+                <p style="margin:0 0 10px; font-size:10.5px; font-weight:700; letter-spacing:0.22em; text-transform:uppercase; color:{gold};">
+                  Message
+                </p>
+                <div style="padding:16px 18px; background-color:#fdfaf2; border:1px solid rgba(187,140,63,0.14); border-radius:6px; white-space:pre-wrap; font-size:14px; line-height:1.6; color:{ink};">
+                  {message_html}
+                </div>
+              </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+              <td style="padding: 24px 40px 0;">
+                <div style="border-top:1px solid rgba(187,140,63,0.22); height:0; line-height:0; font-size:0;">&nbsp;</div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding: 18px 40px 30px; text-align:left;">
+                <p style="margin:0; font-size:11px; letter-spacing:0.18em; text-transform:uppercase; color:{gold}; font-weight:700;">
+                  Internal use only
+                </p>
+                <p style="margin:6px 0 0; font-size:11.5px; line-height:1.5; color:{muted};">
+                  This is an automated notification from the Hooten Young Ops Platform. Reply directly to the submitter at <a href="mailto:{submitter_email}" style="color:{muted}; text-decoration:underline;">{submitter_email}</a> if follow-up is appropriate.
+                </p>
+              </td>
+            </tr>
+          </table>
+
           <p style="margin:24px 0 0; font-size:10.5px; letter-spacing:0.18em; text-transform:uppercase; color:{muted}; opacity:0.7;">
             &copy; Hooten Young American Whiskey
           </p>

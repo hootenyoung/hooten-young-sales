@@ -27,6 +27,7 @@ import structlog
 from hy_sales.email.templates import (
     RenderedEmail,
     render_admin_signup_notification,
+    render_feedback_email,
     render_reset_email,
 )
 from hy_sales.settings import Settings
@@ -159,4 +160,45 @@ async def send_admin_signup_notification(
         settings=settings,
         category="admin_signup_notification",
         log_extra={"requester_email": requester_email},
+    )
+
+
+async def send_feedback_email(
+    *,
+    recipient_email: str,
+    category: str,
+    message: str,
+    page_path: str | None,
+    allow_followup: bool,
+    submitter_first_name: str,
+    submitter_last_name: str,
+    submitter_email: str,
+    submitted_at_display: str,
+    feedback_id: int,
+    settings: Settings,
+) -> bool:
+    """Send (or log) a feedback notification email to one recipient.
+
+    The DB row in ``auth.feedback`` is the source of truth — this
+    function is best-effort delivery on top.  Caller invokes it once
+    per recipient parsed from ``platform.app_config.feedback_recipients``.
+    """
+    rendered = render_feedback_email(
+        category=category,
+        message=message,
+        page_path=page_path,
+        allow_followup=allow_followup,
+        submitter_first_name=submitter_first_name,
+        submitter_last_name=submitter_last_name,
+        submitter_email=submitter_email,
+        submitted_at_display=submitted_at_display,
+        feedback_id=feedback_id,
+        reference_url=settings.frontend_reset_url,
+    )
+    return await _post_to_sendgrid(
+        recipient_email=recipient_email,
+        rendered=rendered,
+        settings=settings,
+        category=f"feedback_{category}",
+        log_extra={"feedback_id": feedback_id, "submitter": submitter_email},
     )

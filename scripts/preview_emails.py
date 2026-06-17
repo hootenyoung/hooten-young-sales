@@ -12,6 +12,7 @@ from pathlib import Path
 
 from hy_sales.email.templates import (
     render_admin_signup_notification,
+    render_feedback_email,
     render_reset_email,
 )
 
@@ -81,6 +82,51 @@ def main() -> None:
         "      (Sent to every active admin when a user submits a new sign-up request via /signup.)"
     )
     print()
+
+    # User feedback (one preview per category — visual identity differs)
+    feedback_samples = [
+        (
+            "idea",
+            "It would be great to filter the audit log by date range — "
+            "I want to see everything from last quarter at once.",
+        ),
+        (
+            "bug",
+            "The Depletions chart shows wrong totals on the iPad when I "
+            "rotate landscape. Numbers reset to zero until I scroll.",
+        ),
+        (
+            "praise",
+            "Just wanted to say the new landing page is gorgeous — feels "
+            "like a real product now. Thank you!",
+        ),
+        (
+            "other",
+            "Is there a way to export users as CSV?  Asking for our quarterly compliance audit.",
+        ),
+    ]
+    for i, (category, message) in enumerate(feedback_samples, start=5):
+        rendered = render_feedback_email(
+            category=category,
+            message=message,
+            page_path="/sales/depletions" if category == "bug" else "/admin/users",
+            allow_followup=category != "other",
+            submitter_first_name="Aswini",
+            submitter_last_name="Yalavarthy",
+            submitter_email="aswini@cach22.ai",
+            submitted_at_display="Jun 16, 2026 at 04:09 PM UTC",
+            feedback_id=100 + i,
+            reference_url=SAMPLE_RESET_URL,
+        )
+        feedback_target = OUT_DIR / f"{i:02d}_feedback_{category}.html"
+        feedback_target.write_text(rendered.html_body, encoding="utf-8")
+        print(f"  → {feedback_target}")
+        print(f"      subject: {rendered.subject}")
+        print(
+            f"      (User feedback — {category} category — sent to every recipient "
+            "in platform.app_config.feedback_recipients.)"
+        )
+        print()
 
     print(f"Open in browser:  open {OUT_DIR}")
 

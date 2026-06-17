@@ -12,6 +12,7 @@ import pytest
 
 from hy_sales.email.templates import (
     render_admin_signup_notification,
+    render_feedback_email,
     render_reset_email,
 )
 
@@ -183,3 +184,80 @@ def test_admin_signup_notification_falls_back_for_missing_recipient_name() -> No
     assert "Hi there" in rendered.text_body
     # Requester name strips and still surfaces gracefully.
     assert "Aswini" in rendered.html_body
+
+
+# ---------------------------------------------------------------------
+# Feedback email
+# ---------------------------------------------------------------------
+
+
+def test_feedback_email_subject_includes_category_and_submitter() -> None:
+    rendered = render_feedback_email(
+        category="bug",
+        message="The chart doesn't load on iPad.",
+        page_path="/sales/depletions",
+        allow_followup=True,
+        submitter_first_name="Aswini",
+        submitter_last_name="Yalavarthy",
+        submitter_email="aswini@example.test",
+        submitted_at_display="Jun 16, 2026 at 04:09 PM UTC",
+        feedback_id=42,
+        reference_url="https://ops-dev.hootenyoung.com/auth/reset-password",
+    )
+    assert rendered.subject == "[HY Ops Feedback] Bug from Aswini Yalavarthy"
+    assert "Aswini Yalavarthy" in rendered.html_body
+    assert "aswini@example.test" in rendered.html_body
+    assert "/sales/depletions" in rendered.html_body
+    assert "Bug" in rendered.html_body
+
+
+def test_feedback_email_message_is_html_escaped() -> None:
+    """User-supplied message must be HTML-escaped to prevent injection."""
+    rendered = render_feedback_email(
+        category="other",
+        message="<script>alert('xss')</script>",
+        page_path=None,
+        allow_followup=False,
+        submitter_first_name="Test",
+        submitter_last_name="User",
+        submitter_email="test@example.test",
+        submitted_at_display="Just now",
+        feedback_id=1,
+        reference_url="https://ops.hootenyoung.com/auth/reset-password",
+    )
+    assert "<script>" not in rendered.html_body
+    assert "&lt;script&gt;" in rendered.html_body
+
+
+def test_feedback_email_logo_url_is_environment_aware() -> None:
+    rendered = render_feedback_email(
+        category="idea",
+        message="Add CSV export",
+        page_path="/admin/users",
+        allow_followup=True,
+        submitter_first_name="Prasad",
+        submitter_last_name="Y",
+        submitter_email="prasad@example.test",
+        submitted_at_display="Jun 16, 2026",
+        feedback_id=10,
+        reference_url="https://ops.hootenyoung.com/auth/reset-password",
+    )
+    assert "https://ops.hootenyoung.com/brand/hy-logo.png" in rendered.html_body
+
+
+def test_feedback_email_handles_missing_page_path() -> None:
+    rendered = render_feedback_email(
+        category="praise",
+        message="Love the new dashboard!",
+        page_path=None,
+        allow_followup=True,
+        submitter_first_name="Meghana",
+        submitter_last_name="D",
+        submitter_email="meghana@example.test",
+        submitted_at_display="Just now",
+        feedback_id=99,
+        reference_url="https://ops.hootenyoung.com/auth/reset-password",
+    )
+    # Missing path renders as an em dash so the row never reads empty.
+    assert "—" in rendered.html_body
+    assert "—" in rendered.text_body
