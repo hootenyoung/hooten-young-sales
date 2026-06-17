@@ -53,8 +53,14 @@ jobs:
       - name: mypy
         run: uv run mypy src
 
-      - name: pytest
-        run: uv run pytest -q
+      - name: pytest (unit tests only)
+        # tests/api/** are DB-integration tests that need a real
+        # Postgres reachable at DATABASE_URL.  CI doesn't provision a
+        # Postgres service container yet, so we run them locally and
+        # exclude them from CI.  TODO: add a postgres service step
+        # here, run db/migrations/*.sql against it, then drop the
+        # --ignore and run the full suite.
+        run: uv run pytest -q --ignore=tests/api
         env:
           DATABASE_URL: "postgresql+asyncpg://test:test@localhost:5432/test"
 
