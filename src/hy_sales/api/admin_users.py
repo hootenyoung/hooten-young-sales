@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from hy_sales.auth.audit import audit_event, client_ip, load_user_detail, log_reset_link
+from hy_sales.auth.audit import audit_event, client_ip, issue_reset_link, load_user_detail
 from hy_sales.auth.dependencies import CurrentUser, require_role
 from hy_sales.db.session import get_session
 from hy_sales.models import AuthPasswordResetToken, AuthRole, AuthUser, AuthUserRole
@@ -313,8 +313,12 @@ async def create_user(
             requested_by_ip=client_ip(request),
         )
     )
-    set_password_url = log_reset_link(
+    # Admin-creates-user: even if SendGrid delivery fails the admin
+    # gets the URL back in the response so they can paste it into
+    # Slack / DM / email manually — so we don't propagate failures.
+    set_password_url = await issue_reset_link(
         email=user.email,
+        first_name=user.first_name,
         plaintext_token=plaintext,
         purpose="set_password",
         settings=settings,
@@ -535,10 +539,17 @@ async def _issue_reset_for_user(
     )
     user.must_change_password = True
 
-    reset_url = log_reset_link(
+    # Map the token purpose to the email-template purpose.  The token
+    # type stays `forgot_password` (because the user picks any new
+    # password via the same flow) but the wording the recipient sees
+    # changes: a fresh `set_password` invite reads as "welcome", a
+    # `forgot_password` admin-press reads as "we reset your password".
+    email_purpose = "set_password" if purpose == "set_password" else "admin_initiated"
+    reset_url = await issue_reset_link(
         email=user.email,
+        first_name=user.first_name,
         plaintext_token=plaintext,
-        purpose=purpose,
+        purpose=email_purpose,
         settings=settings,
     )
 

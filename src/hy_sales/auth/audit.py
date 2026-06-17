@@ -16,6 +16,7 @@ from fastapi import Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from hy_sales.email import send_reset_email
 from hy_sales.models import AuthAuditLog, AuthRole, AuthUser, AuthUserRole
 from hy_sales.schemas.auth import RolePublic, UserDetail
 from hy_sales.settings import Settings
@@ -57,21 +58,37 @@ def audit_event(
     )
 
 
-def log_reset_link(
+async def issue_reset_link(
     *,
     email: str,
+    first_name: str,
     plaintext_token: str,
     purpose: str,
     settings: Settings,
+    raise_on_send_failure: bool = False,
 ) -> str:
-    """Stub for the password-reset / set-password email.
+    """Build the reset URL, log it, and (when configured) email it.
 
-    Builds the URL the user would click, emits a structured structlog
-    event at INFO level so it shows up in dev server output, and
-    returns the URL — the admin-creates-user flow returns the URL in
-    its response while SendGrid wiring is deferred to Phase 4.
+    Returns the URL so callers can also surface it in their HTTP
+    response — useful as a copy-paste fallback when SendGrid is
+    misconfigured or the recipient's inbox is unreliable.
+
+    ``raise_on_send_failure`` controls error propagation:
+
+    * ``False`` (default) — used by ``admin_created_user`` and
+      ``admin_issue_reset``: the URL is returned in the response so
+      the admin can deliver it manually if SendGrid is down; we
+      log the failure and proceed.
+    * ``True`` — used by the public ``forgot-password`` flow: the
+      user has no other delivery channel, so if SendGrid is down we
+      surface a 5xx and the caller can try again.
+
+    When ``settings.sendgrid_api_key`` is unset the function never
+    raises and never hits the network — it just logs the link so
+    local dev / tests keep working without secrets.
     """
     reset_url = f"{settings.frontend_reset_url}?token={plaintext_token}"
+
     _log.info(
         "auth.reset_link_issued",
         email=email,
@@ -79,6 +96,22 @@ def log_reset_link(
         reset_url=reset_url,
         ttl_hours=settings.password_reset_ttl_hours,
     )
+
+    try:
+        await send_reset_email(
+            recipient_email=email,
+            recipient_first_name=first_name,
+            reset_url=reset_url,
+            purpose=purpose,
+            settings=settings,
+        )
+    except Exception:
+        # ``send_reset_email`` already logged the failure with
+        # SendGrid's response body — we just decide whether to
+        # propagate based on caller intent.
+        if raise_on_send_failure:
+            raise
+
     return reset_url
 
 

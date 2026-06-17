@@ -8,9 +8,9 @@ Token / reset-link semantics:
   fresh JWT so the client always gets a token whose
   ``must_change_password`` claim reflects current state.
 * ``/forgot-password`` always returns 200 regardless of whether the
-  email exists — avoids email enumeration. Reset links are emitted
-  via the stub in :func:`log_reset_link` (real SendGrid wiring is
-  Phase 4).
+  email exists — avoids email enumeration. Reset links are issued
+  via :func:`issue_reset_link`, which logs the URL and (when SendGrid
+  is configured) sends the templated email.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from hy_sales.auth.audit import audit_event, client_ip, load_user_detail, log_reset_link
+from hy_sales.auth.audit import audit_event, client_ip, issue_reset_link, load_user_detail
 from hy_sales.auth.dependencies import CurrentUser, get_current_user
 from hy_sales.db.session import get_session
 from hy_sales.models import (
@@ -269,11 +269,16 @@ async def forgot_password(
                 requested_by_ip=client_ip(request),
             )
         )
-        log_reset_link(
+        # Forgot-password: the email is the user's only delivery
+        # channel, so propagate failures as 5xx — the form retries
+        # cleanly on the frontend.
+        await issue_reset_link(
             email=user.email,
+            first_name=user.first_name,
             plaintext_token=plaintext,
             purpose="forgot_password",
             settings=settings,
+            raise_on_send_failure=True,
         )
 
     return MessageResponse(

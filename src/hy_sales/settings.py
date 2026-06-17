@@ -83,6 +83,32 @@ class Settings(BaseSettings):
         description="Frontend URL for password-reset links. Token is appended as ?token=...",
     )
 
+    # ---- Email (SendGrid) -----------------------------------------
+    # Outbound transactional email — invitations + password-reset
+    # links.  When ``sendgrid_api_key`` is unset we fall back to a
+    # structlog-only "would have emailed" event (local dev / tests).
+    # Set the key in .env.local (local) or via the deployment secret
+    # store (dev / prod) to actually send mail.
+    sendgrid_api_key: str | None = Field(
+        default=None,
+        description="SendGrid API key.  None = email is logged-only (no send).",
+    )
+    sendgrid_from_email: str = Field(
+        default="no-reply@hootenyoung.com",
+        description=(
+            "Verified SendGrid sender address.  Must match a SendGrid Single Sender or "
+            "Domain Authentication entry."
+        ),
+    )
+    sendgrid_from_name: str = Field(
+        default="Hooten Young",
+        description="Display name shown in the recipient's inbox next to the from address.",
+    )
+    sendgrid_reply_to: str | None = Field(
+        default=None,
+        description="Optional Reply-To header.  Defaults to the from address when unset.",
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
