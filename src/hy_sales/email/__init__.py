@@ -10,6 +10,6 @@ template engine — the bodies are small and version-controlled with
 the code, and avoiding Jinja keeps the dependency surface minimal.
 """
 
-from hy_sales.email.client import send_reset_email
+from hy_sales.email.client import send_admin_signup_notification, send_reset_email
 
-__all__ = ["send_reset_email"]
+__all__ = ["send_admin_signup_notification", "send_reset_email"]

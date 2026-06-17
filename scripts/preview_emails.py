@@ -1,8 +1,8 @@
-"""Render every reset-email purpose to /tmp HTML files for human review.
+"""Render every transactional email to /tmp HTML files for human review.
 
 Run with:  uv run python scripts/preview_emails.py
 
-Outputs three files in /tmp/hy-email-previews/ — open in a browser to
+Outputs HTML files in /tmp/hy-email-previews/ — open in a browser to
 see how each will render in Gmail / Outlook / Apple Mail.
 """
 
@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hy_sales.email.templates import render_reset_email
+from hy_sales.email.templates import (
+    render_admin_signup_notification,
+    render_reset_email,
+)
 
 OUT_DIR = Path("/tmp/hy-email-previews")  # noqa: S108 — dev-only preview artefacts
 
@@ -60,6 +63,24 @@ def main() -> None:
         print(f"      subject: {rendered.subject}")
         print(f"      ({preview['caption']})")
         print()
+
+    # Admin signup notification (a separate render path)
+    admin_rendered = render_admin_signup_notification(
+        recipient_first_name="Meghana",
+        requester_first_name="Aswini",
+        requester_last_name="Yalavarthy",
+        requester_email="aswini@cach22.ai",
+        requested_at_display="Jun 16, 2026 at 04:09 PM UTC",
+        reference_url=SAMPLE_RESET_URL,
+    )
+    admin_target = OUT_DIR / "04_admin_signup_notification.html"
+    admin_target.write_text(admin_rendered.html_body, encoding="utf-8")
+    print(f"  → {admin_target}")
+    print(f"      subject: {admin_rendered.subject}")
+    print(
+        "      (Sent to every active admin when a user submits a new sign-up request via /signup.)"
+    )
+    print()
 
     print(f"Open in browser:  open {OUT_DIR}")
 

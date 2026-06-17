@@ -25,9 +25,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from hy_sales.auth.audit import audit_event, client_ip, issue_reset_link, load_user_detail
 from hy_sales.auth.dependencies import CurrentUser, get_current_user
 from hy_sales.db.session import get_session
+from hy_sales.email import send_admin_signup_notification
 from hy_sales.models import (
     AuthPasswordResetToken,
+    AuthRole,
     AuthUser,
+    AuthUserRole,
 )
 from hy_sales.schemas.auth import (
     ChangePasswordRequest,
@@ -86,9 +89,15 @@ async def signup(
     payload: SignupRequest,
     request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> SignupResponse:
     """Self-service signup. Account is created in ``pending`` status
     and CANNOT log in until an admin approves it.
+
+    After persisting the request, every active admin receives an email
+    pointing at the Pending Approvals tab — closes the loop so a
+    signup doesn't sit unnoticed.  Email delivery is best-effort:
+    failures are logged but never block the signup itself.
     """
     existing = await session.execute(select(AuthUser).where(AuthUser.email == payload.email))
     if existing.scalar_one_or_none() is not None:
@@ -116,7 +125,58 @@ async def signup(
         request=request,
     )
 
+    await _notify_admins_of_pending_signup(session=session, requester=user, settings=settings)
+
     return SignupResponse(user_id=user.id, status=user.status)
+
+
+async def _notify_admins_of_pending_signup(
+    *,
+    session: AsyncSession,
+    requester: AuthUser,
+    settings: Settings,
+) -> None:
+    """Email every active admin about the new pending request.
+
+    Best-effort: SendGrid failures are swallowed (and logged by the
+    client) so a transient delivery problem can't block the signup
+    itself — the admin can still see the request in /admin/pending.
+    """
+    admins = (
+        (
+            await session.execute(
+                select(AuthUser)
+                .join(AuthUserRole, AuthUserRole.user_id == AuthUser.id)
+                .join(AuthRole, AuthRole.id == AuthUserRole.role_id)
+                .where(AuthRole.name == "admin")
+                .where(AuthUser.status == "active")
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    if not admins:
+        # Edge case — bootstrap state before the first admin is seeded.
+        # The signup still succeeds; we just have no one to notify.
+        return
+
+    requested_at_display = datetime.now(UTC).strftime("%b %d, %Y at %I:%M %p UTC")
+
+    for admin in admins:
+        try:
+            await send_admin_signup_notification(
+                recipient_email=admin.email,
+                recipient_first_name=admin.first_name,
+                requester_first_name=requester.first_name,
+                requester_last_name=requester.last_name,
+                requester_email=requester.email,
+                requested_at_display=requested_at_display,
+                reference_url=settings.frontend_reset_url,
+                settings=settings,
+            )
+        except Exception:  # noqa: S112 — log+continue is intentional; per-recipient delivery is best-effort and client already logs the full SendGrid response.
+            continue
 
 
 @router.post("/login", response_model=TokenResponse)
