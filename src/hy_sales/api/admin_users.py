@@ -9,10 +9,10 @@ Endpoints
 * ``GET    /``                — paginated, filterable users list.
 * ``GET    /{id}``            — full UserDetail for one user.
 * ``POST   /``                — admin-creates-user → issues a set-password
-                                token; the URL is returned in the response
-                                (and logged via structlog stub) so the admin
-                                can deliver it manually until Phase 4 wires
-                                SendGrid.
+                                token + emails the invitation; the URL is
+                                also returned in the response as a fallback
+                                the admin can hand-deliver if the email
+                                never arrives.
 * ``PATCH  /{id}/roles``      — replace a user's role assignments.
 * ``PATCH  /{id}/status``     — change lifecycle state (approve / reject /
                                 disable / re-enable).
@@ -267,9 +267,9 @@ async def create_user(
 ) -> AdminCreateUserResponse:
     """Admin creates a new active user.
 
-    No password is set; the user receives a one-time set-password link
-    (24h TTL). Until SendGrid is wired (Phase 4), the URL is returned
-    in the response so the admin can hand-deliver it.
+    No password is set; the user is emailed a one-time set-password
+    link (24h TTL).  The URL is also returned in the response as a
+    fallback the admin can hand-deliver if SendGrid delivery fails.
     """
     existing = await session.execute(select(AuthUser).where(AuthUser.email == payload.email))
     if existing.scalar_one_or_none() is not None:
@@ -588,11 +588,11 @@ async def reset_user_password(
     """Admin-initiated password reset.
 
     Issues a ``forgot_password`` token + sets ``must_change_password``,
-    then returns the link. Until SendGrid is wired (Phase 4) the admin
-    delivers the link manually (Slack, email, whatever). The user is
-    forced to change their password on next sign-in; any active JWT
-    they hold still works until they hit a ``must_change_password``-
-    gated route, at which point they're redirected to ``/change-password``.
+    emails the user the link, and returns the URL in the response as
+    a fallback (delivery is best-effort).  The user is forced to
+    change their password on next sign-in; any active JWT they hold
+    still works until they hit a ``must_change_password``-gated route,
+    at which point they're redirected to ``/change-password``.
 
     Pending / rejected / disabled users can't have their password
     reset — they have to be approved or re-enabled first.

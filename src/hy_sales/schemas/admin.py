@@ -60,10 +60,10 @@ class UserListResponse(BaseModel):
 class AdminCreateUserRequest(BaseModel):
     """Admin-creates-user payload.
 
-    Backend will create the user with ``status='active'`` and
-    ``must_change_password=True`` (no real password set), then issue
-    a ``set_password`` token whose link gets logged via the existing
-    structlog stub. SendGrid email send is Phase 4.
+    Backend creates the user with ``status='active'`` and
+    ``must_change_password=True`` (no real password set), issues a
+    ``set_password`` token, and emails the invitation to the user via
+    SendGrid.  The link is also returned in the response as a fallback.
     """
 
     email: EmailLower
@@ -116,9 +116,10 @@ class AdminUpdateUserStatusRequest(BaseModel):
 class AdminCreateUserResponse(BaseModel):
     """Result of admin-creates-user.
 
-    ``set_password_url`` is included while SendGrid is not yet wired
-    so the admin can copy the link and send it manually. It will be
-    None in Phase 4 once emails go out automatically.
+    ``set_password_url`` is always populated so the admin has a
+    fallback to hand-deliver the link via Slack / DM if SendGrid
+    delivery fails (delivery is best-effort and does not block
+    account creation).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -132,9 +133,11 @@ class AdminIssueResetResponse(BaseModel):
     """Result of admin-triggered password reset or invitation resend.
 
     Shape matches ``AdminCreateUserResponse`` so the frontend can use
-    the same success step (copy-link affordance) until SendGrid wiring
-    in Phase 4. ``purpose`` reflects whether this was a forgot-password
-    reset (``forgot_password``) or a fresh invitation (``set_password``).
+    the same success step.  The user is emailed the link via SendGrid;
+    ``reset_url`` is also returned in the response as a fallback the
+    admin can hand-deliver.  ``purpose`` reflects whether this was a
+    forgot-password reset (``forgot_password``) or a fresh invitation
+    (``set_password``).
     """
 
     model_config = ConfigDict(frozen=True)
