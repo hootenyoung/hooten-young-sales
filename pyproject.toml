@@ -77,6 +77,8 @@ ignore = [
 # them on Python source lines doesn't help readability and risks
 # introducing whitespace bugs in the rendered HTML.
 "src/hy_sales/email/templates.py" = ["E501"]
+# Designer-preview scripts inline whole HTML chunks too — same reason.
+"scripts/preview_*.py" = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"
