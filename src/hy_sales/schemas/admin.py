@@ -78,6 +78,20 @@ class AdminUpdateUserRolesRequest(BaseModel):
     role_ids: list[uuid.UUID]
 
 
+class AdminUpdateUserProfileRequest(BaseModel):
+    """Admin-side edit of another user's display-name fields.
+
+    Mirrors the self-update ``UpdateMeRequest`` scope on purpose —
+    email changes go through a separate verification flow and roles +
+    status have their own dedicated admin endpoints. Keeping this
+    payload minimal avoids ambiguity in the audit log: every entry
+    under ``admin_updated_user_profile`` is a name-only edit.
+    """
+
+    first_name: Annotated[str, Field(min_length=1, max_length=100)]
+    last_name: Annotated[str, Field(min_length=1, max_length=100)]
+
+
 class AdminUpdateUserStatusRequest(BaseModel):
     """Move a user between lifecycle states.
 
@@ -112,6 +126,23 @@ class AdminCreateUserResponse(BaseModel):
     user: UserDetail
     set_password_url: str | None
     expires_at: datetime
+
+
+class AdminIssueResetResponse(BaseModel):
+    """Result of admin-triggered password reset or invitation resend.
+
+    Shape matches ``AdminCreateUserResponse`` so the frontend can use
+    the same success step (copy-link affordance) until SendGrid wiring
+    in Phase 4. ``purpose`` reflects whether this was a forgot-password
+    reset (``forgot_password``) or a fresh invitation (``set_password``).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    user: UserDetail
+    reset_url: str | None
+    expires_at: datetime
+    purpose: str
 
 
 # =====================================================================

@@ -38,6 +38,7 @@ from hy_sales.schemas.auth import (
     SignupRequest,
     SignupResponse,
     TokenResponse,
+    UpdateMeRequest,
     UserDetail,
 )
 from hy_sales.security import (
@@ -193,6 +194,44 @@ async def me(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found",
         )
+    return await load_user_detail(session, user)
+
+
+@router.patch("/me", response_model=UserDetail)
+async def update_me(
+    payload: UpdateMeRequest,
+    request: Request,
+    current: Annotated[CurrentUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> UserDetail:
+    """Self-update of identity fields (first_name + last_name).
+
+    Email is NOT changeable here — that's a separate flow that
+    requires re-verification. Roles + status are admin-only.
+    """
+    user = await session.get(AuthUser, current.id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+
+    # Snapshot for audit log.
+    old = {"first_name": user.first_name, "last_name": user.last_name}
+    user.first_name = payload.first_name
+    user.last_name = payload.last_name
+
+    audit_event(
+        session,
+        action="profile_updated",
+        user_id=user.id,
+        metadata={
+            "old": old,
+            "new": {"first_name": payload.first_name, "last_name": payload.last_name},
+        },
+        request=request,
+    )
+
     return await load_user_detail(session, user)
 
 

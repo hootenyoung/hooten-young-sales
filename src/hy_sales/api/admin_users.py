@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import delete, func, select
@@ -35,6 +35,8 @@ from hy_sales.models import AuthPasswordResetToken, AuthRole, AuthUser, AuthUser
 from hy_sales.schemas.admin import (
     AdminCreateUserRequest,
     AdminCreateUserResponse,
+    AdminIssueResetResponse,
+    AdminUpdateUserProfileRequest,
     AdminUpdateUserRolesRequest,
     AdminUpdateUserStatusRequest,
     UserListItem,
@@ -161,8 +163,18 @@ async def list_users(
         str | None,
         Query(description="Case-insensitive substring match on email + name."),
     ] = None,
+    sort_by: Annotated[
+        str,
+        Query(
+            description="Column to sort by: name | last_sign_in | created | status | email.",
+        ),
+    ] = "created",
+    sort_dir: Annotated[
+        str,
+        Query(description="Sort direction: asc | desc."),
+    ] = "desc",
 ) -> UserListResponse:
-    """Paginated user list with status/role/search filters."""
+    """Paginated user list with status/role/search filters + sorting."""
     base = select(AuthUser)
     count_base = select(func.count(AuthUser.id))
 
@@ -190,16 +202,35 @@ async def list_users(
         base = base.where(where_search)
         count_base = count_base.where(where_search)
 
+    # Sort ──────────────────────────────────────────────────────────
+    # Map UI sort keys to the underlying ORM columns. Anything not
+    # in this map falls back to created_at DESC so a malformed query
+    # param can't break the page.
+    sort_columns = {
+        "name": (AuthUser.first_name, AuthUser.last_name),
+        "email": (AuthUser.email,),
+        "status": (AuthUser.status,),
+        "last_sign_in": (AuthUser.last_login_at,),
+        "created": (AuthUser.created_at,),
+    }
+    cols = sort_columns.get(sort_by, sort_columns["created"])
+    descending = sort_dir.lower() != "asc"
+    # last_sign_in is nullable — pin NULLs to the bottom regardless
+    # of direction so users who've never signed in don't dominate the
+    # asc page.
+    order_terms: list[Any] = []
+    for c in cols:
+        if c is AuthUser.last_login_at:
+            order_terms.append(c.desc().nullslast() if descending else c.asc().nullslast())
+        else:
+            order_terms.append(c.desc() if descending else c.asc())
+    # Stable secondary sort so equal primary keys come back in a
+    # deterministic order across page boundaries.
+    order_terms.append(AuthUser.id.asc())
+    base = base.order_by(*order_terms)
+
     total = (await session.execute(count_base)).scalar_one()
-    rows = (
-        (
-            await session.execute(
-                base.order_by(AuthUser.created_at.desc()).limit(limit).offset(offset)
-            )
-        )
-        .scalars()
-        .all()
-    )
+    rows = (await session.execute(base.limit(limit).offset(offset))).scalars().all()
 
     items = [await _materialize_list_item(session, u) for u in rows]
     return UserListResponse(items=items, total=total, limit=limit, offset=offset)
@@ -362,6 +393,52 @@ async def update_user_roles(
 
 
 # ---------------------------------------------------------------------
+# PATCH /api/admin/users/{id}/profile
+# ---------------------------------------------------------------------
+
+
+@router.patch("/{user_id}/profile", response_model=UserDetail)
+async def update_user_profile(
+    user_id: str,
+    payload: AdminUpdateUserProfileRequest,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    actor: Annotated[CurrentUser, Depends(require_admin)],
+) -> UserDetail:
+    """Admin-side edit of another user's display-name fields.
+
+    Distinct audit action (``admin_updated_user_profile``) so the
+    activity feed can render "an administrator updated this profile"
+    instead of attributing the change to the user themselves.
+    """
+    user = await session.get(AuthUser, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    old = {"first_name": user.first_name, "last_name": user.last_name}
+    new = {"first_name": payload.first_name, "last_name": payload.last_name}
+
+    # No-op if nothing actually changed — saves an audit row and a
+    # write. Still returns the (unchanged) UserDetail so the client
+    # doesn't have to special-case the response.
+    if old == new:
+        return await load_user_detail(session, user)
+
+    user.first_name = payload.first_name
+    user.last_name = payload.last_name
+
+    audit_event(
+        session,
+        action="admin_updated_user_profile",
+        user_id=user.id,
+        metadata={"changed_by": str(actor.id), "old": old, "new": new},
+        request=request,
+    )
+
+    return await load_user_detail(session, user)
+
+
+# ---------------------------------------------------------------------
 # PATCH /api/admin/users/{id}/status
 # ---------------------------------------------------------------------
 
@@ -420,3 +497,165 @@ async def update_user_status(
     )
 
     return await load_user_detail(session, user)
+
+
+# ---------------------------------------------------------------------
+# POST /api/admin/users/{id}/reset-password
+# ---------------------------------------------------------------------
+
+
+async def _issue_reset_for_user(
+    *,
+    user: AuthUser,
+    purpose: str,
+    audit_action: str,
+    actor: CurrentUser,
+    session: AsyncSession,
+    settings: Settings,
+    request: Request,
+) -> AdminIssueResetResponse:
+    """Shared helper for admin-issued reset / invitation flows.
+
+    Generates a fresh password-reset token (the existing schema row
+    type — only `purpose` differs), flags the user so their next
+    sign-in is forced to set a new password, logs the URL via the
+    structlog stub, and writes an audit row attributing the action
+    to the calling admin.
+    """
+    plaintext, digest = generate_reset_token()
+    expires_at = datetime.now(UTC) + timedelta(hours=settings.password_reset_ttl_hours)
+    session.add(
+        AuthPasswordResetToken(
+            user_id=user.id,
+            token_hash=digest,
+            purpose=purpose,
+            expires_at=expires_at,
+            requested_by_ip=client_ip(request),
+        )
+    )
+    user.must_change_password = True
+
+    reset_url = log_reset_link(
+        email=user.email,
+        plaintext_token=plaintext,
+        purpose=purpose,
+        settings=settings,
+    )
+
+    audit_event(
+        session,
+        action=audit_action,
+        user_id=user.id,
+        metadata={
+            "actor_id": str(actor.id),
+            "purpose": purpose,
+            "email": user.email,
+        },
+        request=request,
+    )
+
+    detail = await load_user_detail(session, user)
+    return AdminIssueResetResponse(
+        user=detail,
+        reset_url=reset_url,
+        expires_at=expires_at,
+        purpose=purpose,
+    )
+
+
+@router.post(
+    "/{user_id}/reset-password",
+    response_model=AdminIssueResetResponse,
+)
+async def reset_user_password(
+    user_id: str,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    actor: Annotated[CurrentUser, Depends(require_admin)],
+) -> AdminIssueResetResponse:
+    """Admin-initiated password reset.
+
+    Issues a ``forgot_password`` token + sets ``must_change_password``,
+    then returns the link. Until SendGrid is wired (Phase 4) the admin
+    delivers the link manually (Slack, email, whatever). The user is
+    forced to change their password on next sign-in; any active JWT
+    they hold still works until they hit a ``must_change_password``-
+    gated route, at which point they're redirected to ``/change-password``.
+
+    Pending / rejected / disabled users can't have their password
+    reset — they have to be approved or re-enabled first.
+    """
+    user = await session.get(AuthUser, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if user.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "invalid_user_status",
+                "message": (
+                    f"Cannot reset password for a user in status {user.status!r}. "
+                    "Approve or re-enable them first."
+                ),
+            },
+        )
+
+    return await _issue_reset_for_user(
+        user=user,
+        purpose="forgot_password",
+        audit_action="admin_initiated_password_reset",
+        actor=actor,
+        session=session,
+        settings=settings,
+        request=request,
+    )
+
+
+# ---------------------------------------------------------------------
+# POST /api/admin/users/{id}/resend-invitation
+# ---------------------------------------------------------------------
+
+
+@router.post(
+    "/{user_id}/resend-invitation",
+    response_model=AdminIssueResetResponse,
+)
+async def resend_user_invitation(
+    user_id: str,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    actor: Annotated[CurrentUser, Depends(require_admin)],
+) -> AdminIssueResetResponse:
+    """Re-issue a set-password invitation for a user who hasn't yet
+    set their initial password.
+
+    Only valid when ``must_change_password`` is True — i.e. the user
+    was admin-created but never used their original link (it expired,
+    got lost, etc.). For users who already set their password and just
+    forgot it, use ``/reset-password`` instead.
+    """
+    user = await session.get(AuthUser, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if not user.must_change_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "no_invitation_pending",
+                "message": (
+                    "This user has already set their password. Use a password reset instead."
+                ),
+            },
+        )
+
+    return await _issue_reset_for_user(
+        user=user,
+        purpose="set_password",
+        audit_action="admin_invitation_resent",
+        actor=actor,
+        session=session,
+        settings=settings,
+        request=request,
+    )

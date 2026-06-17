@@ -154,8 +154,17 @@ def _missing_role_error(required: str | tuple[str, ...]) -> HTTPException:
     )
 
 
+ADMIN_ROLE = "admin"
+
+
 def require_role(role_name: str) -> Any:
     """Factory: returns a dependency that 403s unless the user has ``role_name``.
+
+    The ``admin`` role is treated as a wildcard — admins implicitly
+    pass any role check. This matches admin's product semantics
+    ("full platform access") and avoids the surprise where a user
+    granted the ``admin`` role still gets 403 on a ``depletions``-
+    gated route because they weren't separately granted ``depletions``.
 
     Usage::
 
@@ -172,6 +181,8 @@ def require_role(role_name: str) -> Any:
     ) -> CurrentUser:
         if user.must_change_password:
             raise _must_change_password_error()
+        if user.has_role(ADMIN_ROLE):
+            return user
         if not user.has_role(role_name):
             raise _missing_role_error(role_name)
         return user
@@ -200,6 +211,9 @@ def require_any_role(*role_names: str) -> Any:
     ) -> CurrentUser:
         if user.must_change_password:
             raise _must_change_password_error()
+        # Admin wildcard — see require_role docstring.
+        if user.has_role(ADMIN_ROLE):
+            return user
         if not user.has_any_role(*role_names):
             raise _missing_role_error(role_names)
         return user

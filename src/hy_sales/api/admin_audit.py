@@ -30,6 +30,47 @@ router = APIRouter(
     dependencies=[Depends(require_admin)],
 )
 
+# Friendly category → set of underlying action keys. Used by the admin
+# UI to present a small set of meaningful filter chips ("Sign-ins",
+# "Passwords") instead of one dropdown listing every raw action.
+# When both ``action`` and ``category`` are supplied, ``action`` wins
+# because it's the more specific filter.
+CATEGORY_ACTIONS: dict[str, list[str]] = {
+    "signins": ["login_success", "login_failed"],
+    "signups": [
+        "signup_submitted",
+        "signup_approved",
+        "signup_rejected",
+        "admin_created_user",
+    ],
+    "passwords": [
+        "password_changed",
+        "password_change_failed",
+        "password_set",
+        "password_reset_requested",
+        "password_reset_failed",
+        "admin_initiated_password_reset",
+        "admin_invitation_resent",
+    ],
+    "roles": ["roles_changed", "role_created"],
+    "admin_actions": [
+        "admin_created_user",
+        "admin_initiated_password_reset",
+        "admin_invitation_resent",
+        "admin_updated_user_profile",
+        "signup_approved",
+        "signup_rejected",
+        "account_disabled",
+        "account_enabled",
+        "role_created",
+    ],
+    "security": [
+        "login_failed",
+        "password_reset_failed",
+        "password_change_failed",
+    ],
+}
+
 
 @router.get("", response_model=AuditLogResponse)
 async def list_audit_log(
@@ -41,7 +82,17 @@ async def list_audit_log(
     ] = None,
     action: Annotated[
         str | None,
-        Query(description="Filter to entries with this action key."),
+        Query(description="Filter to entries with this single action key."),
+    ] = None,
+    category: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Filter to entries whose action falls in this category. "
+                f"Recognised values: {', '.join(CATEGORY_ACTIONS)}. Ignored if "
+                "``action`` is also supplied."
+            ),
+        ),
     ] = None,
     user_id: Annotated[
         str | None,
@@ -74,6 +125,8 @@ async def list_audit_log(
         stmt = stmt.where(AuthAuditLog.id < cursor)
     if action:
         stmt = stmt.where(AuthAuditLog.action == action)
+    elif category and category in CATEGORY_ACTIONS:
+        stmt = stmt.where(AuthAuditLog.action.in_(CATEGORY_ACTIONS[category]))
     if user_id:
         stmt = stmt.where(AuthAuditLog.user_id == user_id)
     if since:

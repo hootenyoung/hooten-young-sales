@@ -95,6 +95,15 @@ class ChangePasswordRequest(BaseModel):
     new_password: PasswordStr
 
 
+class UpdateMeRequest(BaseModel):
+    """Self-update of mutable identity fields. Email + roles + status
+    are NOT changeable here (those go through admin or the password
+    flows). Only the user's display name."""
+
+    first_name: Annotated[str, Field(min_length=1, max_length=100)]
+    last_name: Annotated[str, Field(min_length=1, max_length=100)]
+
+
 # =====================================================================
 # Response models
 # =====================================================================
