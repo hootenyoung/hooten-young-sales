@@ -11,12 +11,13 @@ def test_package_imports() -> None:
 
 
 def test_models_register_under_known_schemas() -> None:
-    """Every ORM table registers under the 'sales' / 'depletions' / 'auth' schema."""
+    """Every ORM table registers under an allowed schema."""
     from hy_sales.models import Base
 
+    allowed = {"sales", "depletions", "auth", "platform"}
     assert Base.metadata.tables, "no models registered"
     for table in Base.metadata.tables.values():
-        assert table.schema in {"sales", "depletions", "auth"}, (
+        assert table.schema in allowed, (
             f"Table {table.schema}.{table.name!r} is not in an allowed schema"
         )
 
@@ -43,12 +44,15 @@ def test_models_match_expected_tables() -> None:
         "depletions.product_aliases",
         "depletions.accounts",
         "depletions.facts",
-        # Auth schema — identity + role-based access
+        # Auth schema — identity + role-based access + feedback
         "auth.roles",
         "auth.users",
         "auth.user_roles",
         "auth.password_reset_tokens",
         "auth.audit_log",
+        "auth.feedback",
+        # Platform schema — cross-domain runtime settings
+        "platform.app_config",
     }
     assert table_names == expected, (
         f"Unexpected tables. Missing: {expected - table_names}, Extra: {table_names - expected}"
@@ -93,3 +97,4 @@ def test_app_factory_returns_fastapi() -> None:
     assert "/api/admin/users/{user_id}/status" in paths
     assert "/api/admin/roles" in paths
     assert "/api/admin/audit-log" in paths
+    assert "/api/feedback" in paths
