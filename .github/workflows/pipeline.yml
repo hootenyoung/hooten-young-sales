@@ -124,8 +124,13 @@ jobs:
           env_vars: |-
             APP_ENV=dev
             LOG_LEVEL=INFO
+            FRONTEND_RESET_URL=https://ops-dev.hootenyoung.com/auth/reset-password
+            SENDGRID_FROM_EMAIL=ops-no-reply@hootenyoung.com
+            SENDGRID_FROM_NAME=Hooten Young Platform
           secrets: |-
             DATABASE_URL=DATABASE_URL_DEV:latest
+            JWT_SECRET=JWT_SECRET:latest
+            SENDGRID_API_KEY=SENDGRID_API_KEY:latest
 
   deploy-prod:
     name: Deploy to prod
@@ -160,5 +165,10 @@ jobs:
           env_vars: |-
             APP_ENV=prod
             LOG_LEVEL=INFO
+            FRONTEND_RESET_URL=https://ops.hootenyoung.com/auth/reset-password
+            SENDGRID_FROM_EMAIL=ops-no-reply@hootenyoung.com
+            SENDGRID_FROM_NAME=Hooten Young Platform
           secrets: |-
             DATABASE_URL=DATABASE_URL_PROD:latest
+            JWT_SECRET=JWT_SECRET:latest
+            SENDGRID_API_KEY=SENDGRID_API_KEY:latest
