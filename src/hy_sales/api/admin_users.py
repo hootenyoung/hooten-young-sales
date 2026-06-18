@@ -25,7 +25,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from hy_sales.auth.audit import audit_event, client_ip, issue_reset_link, load_user_detail
@@ -216,6 +216,13 @@ async def list_users(
     if status_filter:
         base = base.where(AuthUser.status == status_filter)
         count_base = count_base.where(AuthUser.status == status_filter)
+    else:
+        # No explicit filter → hide soft-deleted users from the
+        # default roster.  Admins can still inspect them via the
+        # audit log; the user-management table only deals with
+        # accounts that are part of the active org.
+        base = base.where(AuthUser.status != "deleted")
+        count_base = count_base.where(AuthUser.status != "deleted")
 
     if role:
         role_subq = (
@@ -306,7 +313,13 @@ async def create_user(
     link (24h TTL).  The URL is also returned in the response as a
     fallback the admin can hand-deliver if SendGrid delivery fails.
     """
-    existing = await session.execute(select(AuthUser).where(AuthUser.email == payload.email))
+    # Email collision only matters against non-deleted users.  When a
+    # user is soft-deleted via DELETE /api/admin/users/{id} we mutate
+    # their email to a sentinel value so the original slot frees up
+    # immediately for a fresh admin-create with the same address.
+    existing = await session.execute(
+        select(AuthUser).where(AuthUser.email == payload.email).where(AuthUser.status != "deleted")
+    )
     if existing.scalar_one_or_none() is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -703,5 +716,106 @@ async def resend_user_invitation(
         actor=actor,
         session=session,
         settings=settings,
+        request=request,
+    )
+
+
+# ---------------------------------------------------------------------
+# DELETE /api/admin/users/{id} — soft-delete
+# ---------------------------------------------------------------------
+
+
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_user(
+    user_id: str,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    actor: Annotated[CurrentUser, Depends(require_admin)],
+) -> None:
+    """Soft-delete a user so admins can recreate with the same email.
+
+    The row stays in auth.users (preserving the historical link from
+    audit_log, field_visit_notes, etc.) but is marked status='deleted',
+    has its email mutated to a sentinel value so the original slot
+    frees up for a fresh admin-create, and has all role grants +
+    pending reset tokens cleared.
+
+    Safety rails:
+      * an admin can't delete their own account (lockout risk)
+      * the last active admin can't be deleted (lockout risk)
+    """
+    user = await session.get(AuthUser, user_id)
+    if user is None or user.status == "deleted":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    if user.id == actor.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "self_delete",
+                "message": "You cannot delete your own account.",
+            },
+        )
+
+    # Last-admin guard — count active admins other than this user.
+    is_target_admin = (
+        await session.execute(
+            select(func.count(AuthUserRole.user_id))
+            .join(AuthRole, AuthRole.id == AuthUserRole.role_id)
+            .where(AuthUserRole.user_id == user.id)
+            .where(AuthRole.name == "admin")
+        )
+    ).scalar_one() > 0
+    if is_target_admin:
+        remaining_admins = (
+            await session.execute(
+                select(func.count(AuthUserRole.user_id))
+                .join(AuthRole, AuthRole.id == AuthUserRole.role_id)
+                .join(AuthUser, AuthUser.id == AuthUserRole.user_id)
+                .where(AuthRole.name == "admin")
+                .where(AuthUser.id != user.id)
+                .where(AuthUser.status == "active")
+            )
+        ).scalar_one()
+        if remaining_admins == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "last_admin",
+                    "message": "Cannot delete the last active admin.",
+                },
+            )
+
+    original_email = user.email
+
+    # Free the email slot for reuse.  Sentinel uses the .invalid TLD
+    # (reserved per RFC 2606) so it can never accidentally collide
+    # with a real domain and never resolve to a deliverable inbox.
+    user.email = f"deleted+{user.id}@removed.invalid"
+    user.status = "deleted"
+
+    # Clear role grants so the deleted user shows up with no roles
+    # if their record is ever inspected.  Keeps the data consistent
+    # with the "this account is gone" semantic.
+    await session.execute(delete(AuthUserRole).where(AuthUserRole.user_id == user.id))
+
+    # Invalidate any pending reset / set-password tokens — the link
+    # would otherwise allow the deleted user to "claim" their now-
+    # gone account if the email ever leaked.
+    await session.execute(
+        update(AuthPasswordResetToken)
+        .where(AuthPasswordResetToken.user_id == user.id)
+        .where(AuthPasswordResetToken.used_at.is_(None))
+        .values(used_at=datetime.now(UTC))
+    )
+
+    audit_event(
+        session,
+        action="admin_deleted_user",
+        user_id=actor.id,
+        metadata={
+            "deleted_user_id": str(user.id),
+            "original_email": original_email,
+        },
         request=request,
     )

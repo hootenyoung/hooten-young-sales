@@ -29,7 +29,11 @@ class AuthUser(Base):
             name="users_email_check",
         ),
         CheckConstraint(
-            "status IN ('pending', 'active', 'rejected', 'disabled')",
+            # Keep in lockstep with migration 014.  'deleted' is a
+            # soft-delete sentinel: the row stays for historical
+            # attribution (audit log, visit notes) but is hidden from
+            # the active roster and its email slot is freed.
+            "status IN ('pending', 'active', 'rejected', 'disabled', 'deleted')",
             name="users_status_check",
         ),
         {"schema": "auth"},
