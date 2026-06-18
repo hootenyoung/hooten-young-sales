@@ -190,6 +190,17 @@ async def list_users(
             description="Filter by user status (pending/active/rejected/disabled).",
         ),
     ] = None,
+    setup_status_filter: Annotated[
+        str | None,
+        Query(
+            alias="setup_status",
+            description=(
+                "Filter by claim state: completed (has signed in), "
+                "pending_setup (unused link still valid), "
+                "link_expired (unused link has expired)."
+            ),
+        ),
+    ] = None,
     role: Annotated[
         str | None,
         Query(description="Filter to users assigned the given role name."),
@@ -223,6 +234,52 @@ async def list_users(
         # accounts that are part of the active org.
         base = base.where(AuthUser.status != "deleted")
         count_base = count_base.where(AuthUser.status != "deleted")
+
+    if setup_status_filter:
+        # Mirror the per-row logic in ``_compute_setup_status`` as SQL
+        # so pagination + counts stay accurate.  An "unused valid" token
+        # means a set_password token that has not been used and has
+        # not expired; "unused expired" is the same with expires_at in
+        # the past.
+        now = datetime.now(UTC)
+        has_valid_setup_token = (
+            select(AuthPasswordResetToken.id)
+            .where(AuthPasswordResetToken.user_id == AuthUser.id)
+            .where(AuthPasswordResetToken.purpose == "set_password")
+            .where(AuthPasswordResetToken.used_at.is_(None))
+            .where(AuthPasswordResetToken.expires_at > now)
+            .exists()
+        )
+        has_expired_setup_token = (
+            select(AuthPasswordResetToken.id)
+            .where(AuthPasswordResetToken.user_id == AuthUser.id)
+            .where(AuthPasswordResetToken.purpose == "set_password")
+            .where(AuthPasswordResetToken.used_at.is_(None))
+            .where(AuthPasswordResetToken.expires_at <= now)
+            .exists()
+        )
+        if setup_status_filter == "completed":
+            # Either they've signed in, or there's no unused token to
+            # nudge them with (admin set the password directly).
+            cond = AuthUser.last_login_at.is_not(None) | (
+                ~has_valid_setup_token & ~has_expired_setup_token
+            )
+        elif setup_status_filter == "pending_setup":
+            cond = AuthUser.last_login_at.is_(None) & has_valid_setup_token
+        elif setup_status_filter == "link_expired":
+            cond = (
+                AuthUser.last_login_at.is_(None) & ~has_valid_setup_token & has_expired_setup_token
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "invalid_setup_status",
+                    "message": "setup_status must be completed | pending_setup | link_expired.",
+                },
+            )
+        base = base.where(cond)
+        count_base = count_base.where(cond)
 
     if role:
         role_subq = (
