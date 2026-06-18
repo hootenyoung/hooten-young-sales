@@ -237,6 +237,15 @@ class FollowUpAccount(BaseModel):
     # eyeball the order pattern without reading any numbers.
     monthly_series: list[FollowUpMonthlyVolume]
 
+    # ─── Rep-context fields ───────────────────────────────────────
+    # Populated only when this response is built for a field rep
+    # (the Field Sales surface).  Default values keep the depletions
+    # section's existing payloads byte-compatible.
+    is_pinned: bool = False
+    last_visit_date: date | None = None
+    last_outcome: str | None = None
+    last_note_excerpt: str | None = None
+
 
 class FollowUpBucket(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -247,11 +256,44 @@ class FollowUpBucket(BaseModel):
     accounts: list[FollowUpAccount]
 
 
+class TerritorySummary(BaseModel):
+    """Per-territory account counts surfaced on the Field Sales
+    Follow-up Tracker so the rep can see how many accounts exist in
+    their territory and how many made it into the buckets.
+
+    Populated only when ``state_codes`` is provided to the service —
+    the depletions section (analyst view, no territory) leaves this
+    field at None.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    states: list[str]
+    total_accounts: int
+    with_shipment_history: int
+    without_shipment_history: int
+
+
+class DataWindow(BaseModel):
+    """Earliest and latest period_month present in the depletions
+    facts table.  Lets the UI anchor the response in a concrete date
+    range — "drawing from depletions data Jan 2024 - May 2026" —
+    so the rep knows how far back the bucket math actually reaches.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    earliest: date
+    latest: date
+
+
 class FollowUpTrackerResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     reference_date: date
     buckets: list[FollowUpBucket]
+    territory: TerritorySummary | None = None
+    data_window: DataWindow | None = None
 
 
 # ----------------------------------------------------------------

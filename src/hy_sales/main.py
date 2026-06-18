@@ -15,11 +15,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from hy_sales import __version__
 from hy_sales.api.admin_audit import router as admin_audit_router
+from hy_sales.api.admin_field import router as admin_field_router
 from hy_sales.api.admin_roles import router as admin_roles_router
 from hy_sales.api.admin_users import router as admin_users_router
 from hy_sales.api.auth import router as auth_router
 from hy_sales.api.depletions import router as depletions_router
 from hy_sales.api.feedback import router as feedback_router
+from hy_sales.api.field import router as field_router
 from hy_sales.api.health import router as health_router
 from hy_sales.api.platform_config import router as platform_config_router
 from hy_sales.api.sales import router as sales_router
@@ -79,8 +81,10 @@ def create_app() -> FastAPI:
     fastapi_app.include_router(admin_users_router)
     fastapi_app.include_router(admin_roles_router)
     fastapi_app.include_router(admin_audit_router)
+    fastapi_app.include_router(admin_field_router)
     fastapi_app.include_router(feedback_router)
     fastapi_app.include_router(platform_config_router)
+    fastapi_app.include_router(field_router)
     fastapi_app.include_router(sales_router)
     fastapi_app.include_router(depletions_router)
     return fastapi_app

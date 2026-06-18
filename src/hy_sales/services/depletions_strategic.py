@@ -16,6 +16,7 @@ Distributor identity:
 
 from __future__ import annotations
 
+import uuid
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any, cast
@@ -23,7 +24,13 @@ from typing import Any, cast
 from sqlalchemy import and_, case, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from hy_sales.models import DepAccount, DepFact, DepProduct
+from hy_sales.models import (
+    DepAccount,
+    DepFact,
+    DepProduct,
+    FieldAccountPin,
+    FieldVisitNote,
+)
 
 _FOLLOW_UP_BUCKETS = [
     ("0-30 days", 0, 30),
@@ -43,14 +50,28 @@ async def get_follow_up_tracker(
     session: AsyncSession,
     *,
     reference_date: date | None = None,
+    state_codes: list[str] | None = None,
+    rep_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Bucket accounts by days since their last non-zero depletion.
 
     ``reference_date`` defaults to the latest period_month in the data.
     Zero-volume periods do not count as "active" — we look for the last
     month the account moved any product.
+
+    ``state_codes`` — if provided, restrict the tracker to accounts in
+    those states.  Used by the Field Sales surface so a rep sees only
+    their territory.  When None, every state is included.
+
+    ``rep_id`` — when set, each account in the response is enriched
+    with the rep's CRM context: is_pinned (from field.account_pins),
+    last_visit_date / last_outcome / last_note_excerpt (from the
+    rep's most-recent field.visit_notes row for that account).  This
+    lets the Field Sales follow-up view do everything (log visit,
+    pin, see history) inline without leaving the tracker.
     """
     latest: date | None = await session.scalar(select(func.max(DepFact.period_month)))
+    earliest: date | None = await session.scalar(select(func.min(DepFact.period_month)))
     ref: date = reference_date or latest or date.today()
 
     # The reference's first-of-month is the latest cell on the 12-month
@@ -101,6 +122,8 @@ async def get_follow_up_tracker(
             DepAccount.premises_type,
         )
     )
+    if state_codes is not None:
+        stmt = stmt.where(DepAccount.state_code.in_(state_codes))
     rows = (await session.execute(stmt)).all()
 
     # Pass 2 — collect per-account product short-name lists so the UI
@@ -213,9 +236,99 @@ async def get_follow_up_tracker(
     for bucket in buckets.values():
         bucket["accounts"].sort(key=lambda a: a["days_since"])
 
+    # ─── Rep-context enrichment ───────────────────────────────────
+    # Only when a rep_id is supplied (Field Sales surface).  Two
+    # cheap lookups: the rep's pin set, and the latest visit note per
+    # account.  We do this AFTER the bucket assignment so the
+    # enrichment cost is proportional only to accounts that landed
+    # in a bucket, not to the full territory.
+    if rep_id is not None:
+        all_account_ids: list[int] = []
+        for bucket in buckets.values():
+            all_account_ids.extend(a["account_id"] for a in bucket["accounts"])
+
+        pinned_ids: set[int] = set()
+        last_visit_by_account: dict[int, dict[str, Any]] = {}
+        if all_account_ids:
+            pinned_stmt = select(FieldAccountPin.account_id).where(
+                FieldAccountPin.rep_id == rep_id,
+                FieldAccountPin.account_id.in_(all_account_ids),
+            )
+            pinned_ids = {int(r[0]) for r in (await session.execute(pinned_stmt)).all()}
+
+            # Latest note per account — Postgres DISTINCT ON.  Filter
+            # by the territory's account set so we never load notes
+            # for accounts outside this response.
+            latest_note_subq = (
+                select(
+                    FieldVisitNote.account_id,
+                    FieldVisitNote.visit_date,
+                    FieldVisitNote.outcome,
+                    FieldVisitNote.note_text,
+                )
+                .distinct(FieldVisitNote.account_id)
+                .where(FieldVisitNote.account_id.in_(all_account_ids))
+                .order_by(
+                    FieldVisitNote.account_id,
+                    FieldVisitNote.visit_date.desc(),
+                )
+            )
+            for row in (await session.execute(latest_note_subq)).all():
+                note_text = row.note_text or ""
+                excerpt = note_text if len(note_text) <= 140 else note_text[:137] + "…"
+                last_visit_by_account[int(row.account_id)] = {
+                    "last_visit_date": row.visit_date,
+                    "last_outcome": row.outcome,
+                    "last_note_excerpt": excerpt,
+                }
+
+        for bucket in buckets.values():
+            for acct in bucket["accounts"]:
+                aid = int(acct["account_id"])
+                acct["is_pinned"] = aid in pinned_ids
+                ctx = last_visit_by_account.get(aid)
+                if ctx:
+                    acct["last_visit_date"] = ctx["last_visit_date"]
+                    acct["last_outcome"] = ctx["last_outcome"]
+                    acct["last_note_excerpt"] = ctx["last_note_excerpt"]
+
+    # ─── Territory summary ──────────────────────────────────────
+    # When the caller scoped this response to specific states (the
+    # Field Sales surface), surface a small counts block so the rep
+    # can see how many accounts exist in their territory total versus
+    # how many made it into the buckets.  The gap is "in territory
+    # but no shipment history yet" — newly-added retail locations,
+    # prospects, or accounts the depletions feed has never seen.
+    territory: dict[str, Any] | None = None
+    if state_codes is not None:
+        total_in_territory = (
+            await session.scalar(
+                select(func.count())
+                .select_from(DepAccount)
+                .where(DepAccount.state_code.in_(state_codes))
+            )
+        ) or 0
+        with_shipments = sum(int(b["count"]) for b in buckets.values())
+        territory = {
+            "states": sorted(state_codes),
+            "total_accounts": int(total_in_territory),
+            "with_shipment_history": with_shipments,
+            "without_shipment_history": max(0, int(total_in_territory) - with_shipments),
+        }
+
+    # Data window — earliest + latest period_month across all
+    # depletions facts.  Lets the UI anchor counts in a concrete
+    # time range ("drawing from Jan 2024 - May 2026") so the rep
+    # knows how far back the math actually reaches.
+    data_window: dict[str, date] | None = None
+    if earliest is not None and latest is not None:
+        data_window = {"earliest": earliest, "latest": latest}
+
     return {
         "reference_date": ref,
         "buckets": list(buckets.values()),
+        "territory": territory,
+        "data_window": data_window,
     }
 
 

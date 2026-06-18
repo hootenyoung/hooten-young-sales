@@ -14,7 +14,7 @@ def test_models_register_under_known_schemas() -> None:
     """Every ORM table registers under an allowed schema."""
     from hy_sales.models import Base
 
-    allowed = {"sales", "depletions", "auth", "platform"}
+    allowed = {"sales", "depletions", "auth", "platform", "field"}
     assert Base.metadata.tables, "no models registered"
     for table in Base.metadata.tables.values():
         assert table.schema in allowed, (
@@ -53,6 +53,11 @@ def test_models_match_expected_tables() -> None:
         "auth.feedback",
         # Platform schema — cross-domain runtime settings
         "platform.app_config",
+        # Field schema — sales-rep CRM layered on depletions.accounts
+        "field.rep_profiles",
+        "field.rep_territories",
+        "field.account_pins",
+        "field.visit_notes",
     }
     assert table_names == expected, (
         f"Unexpected tables. Missing: {expected - table_names}, Extra: {table_names - expected}"
@@ -99,3 +104,12 @@ def test_app_factory_returns_fastapi() -> None:
     assert "/api/admin/audit-log" in paths
     assert "/api/feedback" in paths
     assert "/api/platform/locked-sections" in paths
+    assert "/api/field/me" in paths
+    assert "/api/field/today" in paths
+    assert "/api/field/accounts" in paths
+    assert "/api/field/accounts/{account_id}" in paths
+    assert "/api/field/accounts/{account_id}/notes" in paths
+    assert "/api/field/accounts/{account_id}/pin" in paths
+    assert "/api/admin/field/reps" in paths
+    assert "/api/admin/field/reps/{user_id}" in paths
+    assert "/api/admin/field/activity" in paths

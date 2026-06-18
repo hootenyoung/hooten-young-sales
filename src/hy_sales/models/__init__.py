@@ -12,6 +12,9 @@ Three physically isolated domains, three Postgres schemas:
 * ``auth`` — authentication + authorization.
     AuthRole, AuthUser, AuthUserRole, AuthPasswordResetToken, AuthAuditLog.
 
+* ``field`` — sales-rep CRM layered on depletions.accounts.
+    FieldRepProfile, FieldRepTerritory, FieldAccountPin, FieldVisitNote.
+
 The SQL migrations under ``db/migrations/`` are the source of truth for
 table structure. These models never CREATE or ALTER tables (we never
 call ``Base.metadata.create_all()``).
@@ -36,6 +39,10 @@ from hy_sales.models.dep_file_upload import DepFileUpload
 from hy_sales.models.dep_product import DepProduct
 from hy_sales.models.dep_product_alias import DepProductAlias
 from hy_sales.models.distributor import Distributor
+from hy_sales.models.field_account_pin import FieldAccountPin
+from hy_sales.models.field_rep_profile import FieldRepProfile
+from hy_sales.models.field_rep_territory import FieldRepTerritory
+from hy_sales.models.field_visit_note import FieldVisitNote
 from hy_sales.models.file_upload import FileUpload
 from hy_sales.models.invoice import Invoice
 from hy_sales.models.invoice_line import InvoiceLine
@@ -60,6 +67,10 @@ __all__ = [
     "DepProduct",
     "DepProductAlias",
     "Distributor",
+    "FieldAccountPin",
+    "FieldRepProfile",
+    "FieldRepTerritory",
+    "FieldVisitNote",
     "FileUpload",
     "Invoice",
     "InvoiceLine",
