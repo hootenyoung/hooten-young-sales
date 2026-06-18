@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -25,12 +25,23 @@ from hy_sales.schemas.auth import EmailLower, RolePublic, UserDetail
 # =====================================================================
 
 
+SetupStatus = Literal["completed", "pending_setup", "link_expired"]
+
+
 class UserListItem(BaseModel):
     """Compact user record for the admin list view.
 
     Excludes ``password_hash`` (obviously) and large nullable fields
     that aren't useful in a table. The full record is available via
     /admin/users/{id} which returns ``UserDetail`` (shared with /me).
+
+    ``setup_status`` reflects whether the user has finished claiming
+    their account.  ``completed`` is the steady state once they've
+    set a password or signed in.  ``pending_setup`` and
+    ``link_expired`` are the two flavours of "admin invited but the
+    user hasn't claimed yet" — the latter means the set-password
+    link has timed out and admin needs to resend an invite for the
+    user to make progress.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -40,6 +51,7 @@ class UserListItem(BaseModel):
     first_name: str
     last_name: str
     status: str
+    setup_status: SetupStatus
     must_change_password: bool
     last_login_at: datetime | None
     created_at: datetime

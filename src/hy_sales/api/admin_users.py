@@ -63,8 +63,41 @@ router = APIRouter(
 # ---------------------------------------------------------------------
 
 
+async def _compute_setup_status(session: AsyncSession, user: AuthUser) -> str:
+    """Resolve whether the user has claimed their account.
+
+    Decision flow:
+      1. If the user has signed in at least once → ``completed``.
+      2. Otherwise look for the most recent unused ``set_password``
+         token.  If one exists and is still valid → ``pending_setup``;
+         if it exists and has expired → ``link_expired``.
+      3. No unused token and no sign-in → ``completed`` (admin
+         either set the password directly or the initial token has
+         been consumed; either way nothing to nudge about).
+    """
+    if user.last_login_at is not None:
+        return "completed"
+
+    latest_token = (
+        await session.execute(
+            select(AuthPasswordResetToken)
+            .where(AuthPasswordResetToken.user_id == user.id)
+            .where(AuthPasswordResetToken.purpose == "set_password")
+            .where(AuthPasswordResetToken.used_at.is_(None))
+            .order_by(AuthPasswordResetToken.expires_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    if latest_token is None:
+        return "completed"
+    if latest_token.expires_at > datetime.now(UTC):
+        return "pending_setup"
+    return "link_expired"
+
+
 async def _materialize_list_item(session: AsyncSession, user: AuthUser) -> UserListItem:
-    """Build a ``UserListItem`` (includes the user's roles)."""
+    """Build a ``UserListItem`` (includes the user's roles + setup status)."""
     role_rows = await session.execute(
         select(AuthRole)
         .join(AuthUserRole, AuthUserRole.role_id == AuthRole.id)
@@ -81,12 +114,14 @@ async def _materialize_list_item(session: AsyncSession, user: AuthUser) -> UserL
         )
         for r in role_rows.scalars().all()
     ]
+    setup_status = await _compute_setup_status(session, user)
     return UserListItem(
         id=user.id,
         email=user.email,
         first_name=user.first_name,
         last_name=user.last_name,
         status=user.status,
+        setup_status=setup_status,
         must_change_password=user.must_change_password,
         last_login_at=user.last_login_at,
         created_at=user.created_at,
